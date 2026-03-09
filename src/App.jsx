@@ -68,13 +68,11 @@ const seedInvoices = [
 ];
 
 const seedPOs = [
-  { id:"PO-2024-0341", vendor:"TechSupply Co.",      description:"Backend Development Q2",   amount:48200, ordered:"2024-04-01", expected:"2024-06-30", status:"Active",    unitType:"days",  totalUnits:60,  monthlyBurn:[0,0,0,12,14,10] },
-  { id:"PO-2024-0342", vendor:"Solara Industries",   description:"Frontend Sprint — Phase 2", amount:38000, ordered:"2024-04-15", expected:"2024-07-15", status:"Active",    unitType:"days",  totalUnits:45,  monthlyBurn:[0,0,0,0,8,12]   },
-  { id:"PO-2024-0343", vendor:"Meridian Corp",       description:"API Integration Project",  amount:72000, ordered:"2024-05-01", expected:"2024-08-31", status:"Active",    unitType:"hours", totalUnits:480, monthlyBurn:[0,0,0,0,60,80]  },
-  { id:"PO-2024-0344", vendor:"NorthBridge LLC",     description:"DevOps & Infra Support",   amount:21500, ordered:"2024-03-01", expected:"2024-06-30", status:"Completed", unitType:"hours", totalUnits:200, monthlyBurn:[40,40,40,40,40,0] },
-  { id:"PO-2024-0345", vendor:"ClearPath Tech",      description:"QA Automation Setup",      amount:35000, ordered:"2024-06-01", expected:"2024-09-01", status:"Active",    unitType:"days",  totalUnits:30,  monthlyBurn:[0,0,0,0,0,5]    },
-  { id:"PO-2024-0340", vendor:"Apex Dynamics",       description:"Mobile App Development",   amount:55000, ordered:"2024-02-01", expected:"2024-05-31", status:"Completed", unitType:"days",  totalUnits:50,  monthlyBurn:[0,10,12,14,14,0] },
-  { id:"PO-2024-0339", vendor:"Vantage Systems",     description:"Data Pipeline Build",      amount:18400, ordered:"2024-05-15", expected:"2024-07-31", status:"Active",    unitType:"hours", totalUnits:120, monthlyBurn:[0,0,0,0,20,30]  },
+  { id:"PO-2024-0341", client:"Vantage Systems",   description:"Backend Development Q2",   amount:48200, startDate:"2024-04-01", endDate:"2024-06-30", status:"Active",    unitType:"days",  totalUnits:60,  monthlyBurn:[0,0,0,12,14,10], projectId:"vantage-systems"   },
+  { id:"PO-2024-0342", client:"Solara Industries",  description:"Frontend Sprint — Phase 2", amount:38000, startDate:"2024-04-15", endDate:"2024-07-15", status:"Active",    unitType:"days",  totalUnits:45,  monthlyBurn:[0,0,0,0,8,12],   projectId:"solara-industries" },
+  { id:"PO-2024-0343", client:"Meridian Corp",      description:"API Integration Project",  amount:72000, startDate:"2024-05-01", endDate:"2024-08-31", status:"Active",    unitType:"hours", totalUnits:480, monthlyBurn:[0,0,0,0,60,80],  projectId:"meridian-corp"     },
+  { id:"PO-2024-0344", client:"NorthBridge LLC",    description:"DevOps & Infra Support",   amount:21500, startDate:"2024-03-01", endDate:"2024-06-30", status:"Completed", unitType:"hours", totalUnits:200, monthlyBurn:[40,40,40,40,40,0],projectId:"northbridge-llc"   },
+  { id:"PO-2024-0345", client:"ClearPath Tech",     description:"QA Automation Setup",      amount:35000, startDate:"2024-06-01", endDate:"2024-09-01", status:"Active",    unitType:"days",  totalUnits:30,  monthlyBurn:[0,0,0,0,0,5],    projectId:"clearpath-tech"    },
 ];
 
 const basePL = {
@@ -183,7 +181,7 @@ Category options (pick the single best match):
   return JSON.parse(text.replace(/```json|```/g, "").trim());
 }
 
-const TABS = ["Overview", "P&L", "Cash Flow", "Invoices", "Projects", "Purchase Orders"];
+const TABS = ["Overview", "P&L", "Cash Flow", "Invoices", "Engagements"];
 
 // ── Main component ────────────────────────────────────────────────────────────
 export default function FinancialDashboard() {
@@ -213,9 +211,46 @@ export default function FinancialDashboard() {
   ]);
   const [editingBank,       setEditingBank]       = useState(null); // id of account being edited
   const [expandedCfMonth,   setExpandedCfMonth]   = useState(null);
+  const [engFilter,         setEngFilter]         = useState("All");
+
+  // ── Forecast state ────────────────────────────────────────────────────────
+  const [showForecastPanel, setShowForecastPanel] = useState(false);
+  const [forecast, setForecast] = useState({
+    months: ALL_MONTHS.map((m, i) => ({
+      month: i,
+      label: m,
+      revenue: 0,
+      costs: 0,
+    })),
+    pipeline: [
+      // example seed — remove later
+      { id:"p1", client:"Potential Client A", value:80000, currency:"EUR", closeMonth:6, probability:70 },
+      { id:"p2", client:"Potential Client B", value:45000, currency:"EUR", closeMonth:7, probability:40 },
+    ],
+  });
+  const [editingForecastMonth, setEditingForecastMonth] = useState(null);
+  const [newPipeline, setNewPipeline] = useState({ client:"", value:"", currency:"EUR", closeMonth:6, probability:50 });
 
   // Convert any amount to EUR using current fx rates
   const toEUR = (amount, currency) => (amount || 0) * (fx[currency || "EUR"] || 1);
+
+  // ── Forecast by month (manual + pipeline weighted) ────────────────────────
+  const forecastByMonth = useMemo(() => {
+    return ALL_MONTHS.map((m, i) => {
+      const fm = forecast.months[i];
+      const pipelineRev = forecast.pipeline
+        .filter(p => p.closeMonth === i)
+        .reduce((s, p) => s + toEUR(p.value, p.currency) * (p.probability / 100), 0);
+      return {
+        month: i,
+        label: m,
+        revenue: (fm?.revenue || 0) + pipelineRev,
+        costs: fm?.costs || 0,
+        pipelineRev,
+        manualRev: fm?.revenue || 0,
+      };
+    });
+  }, [forecast, fx]);
 
   // ── Live P&L from invoices ──────────────────────────────────────────────────
   const dynamicPL = useMemo(() => {
@@ -503,8 +538,9 @@ export default function FinancialDashboard() {
           const achievement  = pctNum(totalRevH1, ytdTarget);
           const progressToYearly = pctNum(totalRevH1, YEARLY_REV_TARGET);
 
-          // Prognosis: extrapolate H1 run-rate to full year
-          const prognosisYearly = avgMonthlyRev * 12;
+          // Prognosis: actual H1 + forecast H2
+          const forecastH2Total = forecastByMonth.slice(MONTHS.length).reduce((s,f) => s+f.revenue, 0);
+          const prognosisYearly = forecastH2Total > 0 ? totalRevH1 + forecastH2Total : avgMonthlyRev * 12;
 
           // Y/Y (compare same months Jan–Jun)
           const rev2025H1    = REV_2025.slice(0, MONTHS.length).reduce((s,v) => s+v, 0);
@@ -590,7 +626,7 @@ export default function FinancialDashboard() {
                 <KPICard
                   label="Prognosis to Yearly Target"
                   value={fmt(prognosisYearly)}
-                  sub={`vs target ${fmt(YEARLY_REV_TARGET)}`}
+                  sub={forecastH2Total > 0 ? `Actual H1 + forecast H2` : `Run-rate extrapolation`}
                   accent={prognosisYearly >= YEARLY_REV_TARGET ? "#2e7d32" : "#c62828"}
                   tag={prognosisYearly >= YEARLY_REV_TARGET
                     ? { label:"▲ On Track", bg:"#e8f5e9", text:"#2e7d32" }
@@ -630,27 +666,53 @@ export default function FinancialDashboard() {
 
               {/* ── Monthly Rev vs Target sparkline ── */}
               <div className="card" style={{ padding:"20px 24px", marginBottom:20 }}>
-                <div style={{ fontWeight:600, fontSize:14, marginBottom:16 }}>Monthly Revenue vs Target · 2026 vs 2025</div>
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
+                  <div style={{ fontWeight:600, fontSize:14 }}>Monthly Revenue vs Target · 2026 vs 2025</div>
+                  <button onClick={() => setShowForecastPanel(v => !v)} style={{
+                    fontFamily:"inherit", fontSize:12, fontWeight:600, cursor:"pointer", borderRadius:8,
+                    padding:"5px 14px", border:"1.5px solid", transition:"all .15s",
+                    background: showForecastPanel ? "#1a1a1a" : "#fff",
+                    color: showForecastPanel ? "#fff" : "#555",
+                    borderColor: showForecastPanel ? "#1a1a1a" : "#e0ddd8",
+                  }}>✦ Forecast & Pipeline</button>
+                </div>
                 <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-                  {MONTHS.map((m, i) => {
-                    const rev26  = revByMonth[i] || 0;
-                    const rev25  = REV_2025[i]   || 0;
-                    const maxVal = Math.max(...revByMonth, ...REV_2025.slice(0,6), MONTHLY_REV_TARGET) * 1.05;
+                  {ALL_MONTHS.map((m, i) => {
+                    const rev26   = revByMonth[i] || 0;
+                    const rev25   = REV_2025[i]   || 0;
+                    const fcst    = forecastByMonth[i];
+                    const isFuture = i >= MONTHS.length;
+                    const forecastRev = fcst.revenue;
+                    const maxVal  = Math.max(...revByMonth, ...REV_2025, ...forecastByMonth.map(f=>f.revenue), MONTHLY_REV_TARGET) * 1.05 || 1;
                     return (
-                      <div key={m} style={{ display:"flex", alignItems:"center", gap:10 }}>
-                        <span style={{ width:28, fontSize:11.5, color:"#999", fontWeight:500 }}>{m}</span>
+                      <div key={m} style={{ display:"flex", alignItems:"center", gap:10, opacity: isFuture && forecastRev === 0 ? 0.35 : 1 }}>
+                        <span style={{ width:28, fontSize:11.5, color: isFuture ? "#aaa" : "#999", fontWeight:500 }}>{m}</span>
                         <div style={{ flex:1, display:"flex", flexDirection:"column", gap:3 }}>
+                          {/* Actual 2026 or forecast bar */}
                           <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-                            <div style={{ height:10, borderRadius:3, background:"#1a1a1a", width:`${(rev26/maxVal)*100}%`, minWidth:4, transition:"width .4s" }}/>
-                            <span style={{ fontSize:11, color:"#555", fontFamily:"DM Mono", whiteSpace:"nowrap" }}>{fmt(rev26)}</span>
-                            {rev26 >= MONTHLY_REV_TARGET
-                              ? <span style={{ fontSize:10, color:"#2e7d32", fontWeight:700 }}>✓</span>
-                              : <span style={{ fontSize:10, color:"#c62828", fontWeight:700 }}>✗</span>}
+                            {isFuture ? (
+                              // Forecast bar — dashed outline style
+                              forecastRev > 0 ? <>
+                                <div style={{ height:10, borderRadius:3, background:"transparent", border:"2px dashed #7c5cbf", width:`${(forecastRev/maxVal)*100}%`, minWidth:4 }}/>
+                                <span style={{ fontSize:11, color:"#7c5cbf", fontFamily:"DM Mono", whiteSpace:"nowrap", fontWeight:600 }}>{fmt(forecastRev)}</span>
+                                {fcst.pipelineRev > 0 && <span style={{ fontSize:10, color:"#7c5cbf", opacity:.7 }}>({fmt(fcst.pipelineRev)} pipeline)</span>}
+                              </> : <span style={{ fontSize:11, color:"#ccc", fontStyle:"italic" }}>no forecast set</span>
+                            ) : (
+                              <>
+                                <div style={{ height:10, borderRadius:3, background:"#1a1a1a", width:`${(rev26/maxVal)*100}%`, minWidth:4, transition:"width .4s" }}/>
+                                <span style={{ fontSize:11, color:"#555", fontFamily:"DM Mono", whiteSpace:"nowrap" }}>{fmt(rev26)}</span>
+                                {rev26 >= MONTHLY_REV_TARGET
+                                  ? <span style={{ fontSize:10, color:"#2e7d32", fontWeight:700 }}>✓</span>
+                                  : <span style={{ fontSize:10, color:"#c62828", fontWeight:700 }}>✗</span>}
+                              </>
+                            )}
                           </div>
+                          {/* 2025 comparison */}
                           <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-                            <div style={{ height:10, borderRadius:3, background:"#b0bec5", width:`${(rev25/maxVal)*100}%`, minWidth:4, transition:"width .4s" }}/>
-                            <span style={{ fontSize:11, color:"#aaa", fontFamily:"DM Mono", whiteSpace:"nowrap" }}>{fmt(rev25)}</span>
+                            <div style={{ height:10, borderRadius:3, background:"#b0bec5", width:`${(rev25/maxVal)*100}%`, minWidth: rev25>0?4:0, transition:"width .4s" }}/>
+                            {rev25 > 0 && <span style={{ fontSize:11, color:"#aaa", fontFamily:"DM Mono", whiteSpace:"nowrap" }}>{fmt(rev25)}</span>}
                           </div>
+                          {/* Target line */}
                           <div style={{ height:1, background:"#e8e6e2", position:"relative" }}>
                             <div style={{ position:"absolute", left:`${(MONTHLY_REV_TARGET/maxVal)*100}%`, top:-4, width:1, height:9, background:"#f57c00" }}/>
                           </div>
@@ -660,11 +722,182 @@ export default function FinancialDashboard() {
                   })}
                 </div>
                 <div style={{ marginTop:14, display:"flex", gap:18, flexWrap:"wrap" }}>
-                  <span style={{ fontSize:11.5, color:"#888", display:"flex", alignItems:"center", gap:5 }}><span style={{ width:10, height:10, borderRadius:2, background:"#1a1a1a", display:"inline-block" }}/> 2026</span>
+                  <span style={{ fontSize:11.5, color:"#888", display:"flex", alignItems:"center", gap:5 }}><span style={{ width:10, height:10, borderRadius:2, background:"#1a1a1a", display:"inline-block" }}/> 2026 Actual</span>
                   <span style={{ fontSize:11.5, color:"#888", display:"flex", alignItems:"center", gap:5 }}><span style={{ width:10, height:10, borderRadius:2, background:"#b0bec5", display:"inline-block" }}/> 2025</span>
+                  <span style={{ fontSize:11.5, color:"#888", display:"flex", alignItems:"center", gap:5 }}><span style={{ width:10, height:10, borderRadius:2, background:"transparent", border:"2px dashed #7c5cbf", display:"inline-block" }}/> Forecast</span>
                   <span style={{ fontSize:11.5, color:"#888", display:"flex", alignItems:"center", gap:5 }}><span style={{ width:2, height:10, background:"#f57c00", display:"inline-block" }}/> Monthly Target</span>
                 </div>
               </div>
+
+              {/* ── Forecast & Pipeline Panel ── */}
+              {showForecastPanel && (
+                <div className="card" style={{ marginBottom:20, overflow:"hidden" }}>
+                  <div style={{ padding:"16px 24px 12px", borderBottom:"1px solid #f0eeea", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                    <div style={{ fontWeight:700, fontSize:14 }}>✦ Forecast & Pipeline</div>
+                    <div style={{ fontSize:12, color:"#aaa" }}>Future months only · figures in EUR · shown as dashed bars on chart</div>
+                  </div>
+
+                  {/* Monthly forecast table */}
+                  <div style={{ padding:"16px 24px" }}>
+                    <div style={{ fontWeight:600, fontSize:12.5, color:"#555", marginBottom:10, textTransform:"uppercase", letterSpacing:".06em" }}>Monthly Forecast</div>
+                    <table className="tbl" style={{ marginBottom:0 }}>
+                      <thead>
+                        <tr>
+                          <th>Month</th>
+                          <th style={{ textAlign:"right" }}>Forecast Revenue</th>
+                          <th style={{ textAlign:"right" }}>Forecast Costs</th>
+                          <th style={{ textAlign:"right" }}>Pipeline (weighted)</th>
+                          <th style={{ textAlign:"right" }}>Total Forecast</th>
+                          <th/>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ALL_MONTHS.map((m, i) => {
+                          const isFuture = i >= MONTHS.length;
+                          const fm = forecast.months[i];
+                          const fc = forecastByMonth[i];
+                          const isEditing = editingForecastMonth === i;
+                          if (!isFuture && !fm?.revenue && !fm?.costs) return null;
+                          return (
+                            <tr key={i} style={{ background: isFuture ? "#fafaf8" : "#fff" }}>
+                              <td style={{ fontWeight:600, color: isFuture ? "#555" : "#aaa" }}>
+                                {m} {isFuture ? <span style={{ fontSize:10.5, color:"#aaa", fontWeight:400 }}>forecast</span> : <span style={{ fontSize:10.5, color:"#2e7d32", fontWeight:400 }}>actual</span>}
+                              </td>
+                              {isEditing ? (
+                                <>
+                                  <td className="num">
+                                    <input type="number" value={fm?.revenue||0} onChange={e => setForecast(prev => ({ ...prev, months: prev.months.map((mo,j) => j===i ? {...mo, revenue:parseFloat(e.target.value)||0} : mo) }))}
+                                      style={{ fontFamily:"DM Mono", fontSize:12, width:110, border:"1.5px solid #1a1a1a", borderRadius:6, padding:"3px 7px", textAlign:"right", outline:"none" }}/>
+                                  </td>
+                                  <td className="num">
+                                    <input type="number" value={fm?.costs||0} onChange={e => setForecast(prev => ({ ...prev, months: prev.months.map((mo,j) => j===i ? {...mo, costs:parseFloat(e.target.value)||0} : mo) }))}
+                                      style={{ fontFamily:"DM Mono", fontSize:12, width:110, border:"1.5px solid #e0ddd8", borderRadius:6, padding:"3px 7px", textAlign:"right", outline:"none" }}/>
+                                  </td>
+                                  <td className="num" style={{ color:"#7c5cbf" }}>{fmt(fc.pipelineRev)}</td>
+                                  <td className="num" style={{ fontWeight:700 }}>{fmt(fc.revenue)}</td>
+                                  <td><button onClick={() => setEditingForecastMonth(null)} style={{ fontFamily:"inherit", fontSize:11.5, fontWeight:600, background:"#1a1a1a", color:"#fff", border:"none", borderRadius:6, padding:"4px 10px", cursor:"pointer" }}>Save</button></td>
+                                </>
+                              ) : (
+                                <>
+                                  <td className="num" style={{ color: fm?.revenue ? "#1a1a1a" : "#ccc" }}>{fm?.revenue ? fmt(fm.revenue) : "—"}</td>
+                                  <td className="num" style={{ color: fm?.costs ? "#c62828" : "#ccc" }}>{fm?.costs ? fmt(fm.costs) : "—"}</td>
+                                  <td className="num" style={{ color:"#7c5cbf" }}>{fc.pipelineRev > 0 ? fmt(fc.pipelineRev) : "—"}</td>
+                                  <td className="num" style={{ fontWeight:700, color: fc.revenue > 0 ? "#7c5cbf" : "#ccc" }}>{fc.revenue > 0 ? fmt(fc.revenue) : "—"}</td>
+                                  <td><button onClick={() => setEditingForecastMonth(i)} style={{ fontFamily:"inherit", fontSize:11.5, background:"none", border:"1.5px solid #e0ddd8", borderRadius:6, padding:"3px 10px", cursor:"pointer", color:"#888" }}>✎ Edit</button></td>
+                                </>
+                              )}
+                            </tr>
+                          );
+                        })}
+                        {/* Show all future months even if empty */}
+                        {ALL_MONTHS.map((m, i) => {
+                          const isFuture = i >= MONTHS.length;
+                          const fm = forecast.months[i];
+                          if (!isFuture || fm?.revenue || fm?.costs) return null;
+                          const fc = forecastByMonth[i];
+                          const isEditing = editingForecastMonth === i;
+                          return (
+                            <tr key={`empty-${i}`} style={{ background:"#fafaf8" }}>
+                              <td style={{ fontWeight:600, color:"#555" }}>{m} <span style={{ fontSize:10.5, color:"#aaa", fontWeight:400 }}>forecast</span></td>
+                              {isEditing ? (
+                                <>
+                                  <td className="num"><input type="number" defaultValue={0} onChange={e => setForecast(prev => ({ ...prev, months: prev.months.map((mo,j) => j===i ? {...mo, revenue:parseFloat(e.target.value)||0} : mo) }))} style={{ fontFamily:"DM Mono", fontSize:12, width:110, border:"1.5px solid #1a1a1a", borderRadius:6, padding:"3px 7px", textAlign:"right", outline:"none" }}/></td>
+                                  <td className="num"><input type="number" defaultValue={0} onChange={e => setForecast(prev => ({ ...prev, months: prev.months.map((mo,j) => j===i ? {...mo, costs:parseFloat(e.target.value)||0} : mo) }))} style={{ fontFamily:"DM Mono", fontSize:12, width:110, border:"1.5px solid #e0ddd8", borderRadius:6, padding:"3px 7px", textAlign:"right", outline:"none" }}/></td>
+                                  <td className="num" style={{ color:"#7c5cbf" }}>{fc.pipelineRev > 0 ? fmt(fc.pipelineRev) : "—"}</td>
+                                  <td className="num" style={{ fontWeight:700, color:"#7c5cbf" }}>{fmt(fc.revenue)}</td>
+                                  <td><button onClick={() => setEditingForecastMonth(null)} style={{ fontFamily:"inherit", fontSize:11.5, fontWeight:600, background:"#1a1a1a", color:"#fff", border:"none", borderRadius:6, padding:"4px 10px", cursor:"pointer" }}>Save</button></td>
+                                </>
+                              ) : (
+                                <>
+                                  <td className="num" style={{ color:"#ccc" }}>—</td>
+                                  <td className="num" style={{ color:"#ccc" }}>—</td>
+                                  <td className="num" style={{ color: fc.pipelineRev > 0 ? "#7c5cbf" : "#ccc" }}>{fc.pipelineRev > 0 ? fmt(fc.pipelineRev) : "—"}</td>
+                                  <td className="num" style={{ color: fc.revenue > 0 ? "#7c5cbf" : "#ccc" }}>{fc.revenue > 0 ? fmt(fc.revenue) : "—"}</td>
+                                  <td><button onClick={() => setEditingForecastMonth(i)} style={{ fontFamily:"inherit", fontSize:11.5, background:"none", border:"1.5px solid #e0ddd8", borderRadius:6, padding:"3px 10px", cursor:"pointer", color:"#888" }}>✎ Set</button></td>
+                                </>
+                              )}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Pipeline deals */}
+                  <div style={{ padding:"0 24px 20px", borderTop:"1px solid #f0eeea" }}>
+                    <div style={{ fontWeight:600, fontSize:12.5, color:"#555", margin:"16px 0 10px", textTransform:"uppercase", letterSpacing:".06em" }}>Pipeline · Potential Clients</div>
+                    <table className="tbl" style={{ marginBottom:12 }}>
+                      <thead>
+                        <tr>
+                          <th>Client</th>
+                          <th style={{ textAlign:"right" }}>Deal Value</th>
+                          <th>Currency</th>
+                          <th>Expected Close</th>
+                          <th style={{ textAlign:"right" }}>Probability</th>
+                          <th style={{ textAlign:"right" }}>Weighted EUR</th>
+                          <th/>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {forecast.pipeline.map(deal => (
+                          <tr key={deal.id}>
+                            <td style={{ fontWeight:500 }}>{deal.client}</td>
+                            <td className="num">{CUR_SYMBOLS[deal.currency]||"€"}{Math.round(deal.value).toLocaleString("de-DE")}</td>
+                            <td style={{ fontSize:12 }}>{deal.currency}</td>
+                            <td style={{ fontSize:12 }}>{ALL_MONTHS[deal.closeMonth]} 2026</td>
+                            <td className="num">
+                              <span style={{ display:"inline-flex", alignItems:"center", gap:6 }}>
+                                <span style={{ width:40, height:5, borderRadius:3, background:"#eceae6", display:"inline-block", overflow:"hidden" }}>
+                                  <span style={{ display:"block", height:"100%", width:`${deal.probability}%`, background:"#7c5cbf", borderRadius:3 }}/>
+                                </span>
+                                {deal.probability}%
+                              </span>
+                            </td>
+                            <td className="num" style={{ fontWeight:600, color:"#7c5cbf" }}>{fmt(toEUR(deal.value, deal.currency) * deal.probability / 100)}</td>
+                            <td>
+                              <button onClick={() => setForecast(prev => ({ ...prev, pipeline: prev.pipeline.filter(d => d.id !== deal.id) }))}
+                                style={{ background:"none", border:"none", cursor:"pointer", color:"#ccc", fontSize:14 }}>✕</button>
+                            </td>
+                          </tr>
+                        ))}
+                        {/* Add new deal row */}
+                        <tr style={{ background:"#fafaf8" }}>
+                          <td><input value={newPipeline.client} onChange={e => setNewPipeline(p => ({...p, client:e.target.value}))} placeholder="Client name" style={{ fontFamily:"inherit", fontSize:12, border:"1.5px solid #e0ddd8", borderRadius:6, padding:"4px 8px", outline:"none", width:"100%" }}/></td>
+                          <td className="num"><input type="number" value={newPipeline.value} onChange={e => setNewPipeline(p => ({...p, value:e.target.value}))} placeholder="0" style={{ fontFamily:"DM Mono", fontSize:12, border:"1.5px solid #e0ddd8", borderRadius:6, padding:"4px 8px", outline:"none", width:100, textAlign:"right" }}/></td>
+                          <td>
+                            <select value={newPipeline.currency} onChange={e => setNewPipeline(p => ({...p, currency:e.target.value}))} style={{ fontFamily:"inherit", fontSize:12, border:"1.5px solid #e0ddd8", borderRadius:6, padding:"4px 6px", outline:"none" }}>
+                              {CURRENCIES.map(c => <option key={c}>{c}</option>)}
+                            </select>
+                          </td>
+                          <td>
+                            <select value={newPipeline.closeMonth} onChange={e => setNewPipeline(p => ({...p, closeMonth:parseInt(e.target.value)}))} style={{ fontFamily:"inherit", fontSize:12, border:"1.5px solid #e0ddd8", borderRadius:6, padding:"4px 6px", outline:"none" }}>
+                              {ALL_MONTHS.map((m,i) => <option key={i} value={i}>{m} 2026</option>)}
+                            </select>
+                          </td>
+                          <td className="num">
+                            <input type="number" min="0" max="100" value={newPipeline.probability} onChange={e => setNewPipeline(p => ({...p, probability:parseInt(e.target.value)||0}))} style={{ fontFamily:"DM Mono", fontSize:12, border:"1.5px solid #e0ddd8", borderRadius:6, padding:"4px 8px", outline:"none", width:60, textAlign:"right" }}/>
+                            <span style={{ fontSize:12, color:"#aaa", marginLeft:4 }}>%</span>
+                          </td>
+                          <td className="num" style={{ color:"#7c5cbf" }}>{newPipeline.value ? fmt(toEUR(parseFloat(newPipeline.value)||0, newPipeline.currency) * newPipeline.probability / 100) : "—"}</td>
+                          <td>
+                            <button onClick={() => {
+                              if (!newPipeline.client || !newPipeline.value) return;
+                              setForecast(prev => ({ ...prev, pipeline: [...prev.pipeline, { ...newPipeline, id:`p${Date.now()}`, value:parseFloat(newPipeline.value) }] }));
+                              setNewPipeline({ client:"", value:"", currency:"EUR", closeMonth:6, probability:50 });
+                            }} style={{ fontFamily:"inherit", fontSize:12, fontWeight:600, background:"#1a1a1a", color:"#fff", border:"none", borderRadius:6, padding:"5px 12px", cursor:"pointer" }}>+ Add</button>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    {forecast.pipeline.length > 0 && (
+                      <div style={{ fontSize:12.5, color:"#aaa" }}>
+                        Total pipeline weighted: <strong style={{ color:"#7c5cbf", fontFamily:"DM Mono" }}>{fmt(forecast.pipeline.reduce((s,d) => s + toEUR(d.value, d.currency) * d.probability / 100, 0))}</strong>
+                        <span style={{ marginLeft:12 }}>Unweighted: <strong style={{ fontFamily:"DM Mono", color:"#555" }}>{fmt(forecast.pipeline.reduce((s,d) => s + toEUR(d.value, d.currency), 0))}</strong></span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* ── Margin Waterfall ── */}
               <div style={{ fontSize:11.5, fontWeight:600, color:"#aaa", textTransform:"uppercase", letterSpacing:".08em", marginBottom:12 }}>Margin Waterfall · H1 2026</div>
@@ -1205,7 +1438,19 @@ export default function FinancialDashboard() {
                       ? <td style={{ fontSize:12, color:"#666", fontFamily:"DM Mono" }}>{inv.devDays}{inv.devUnit==="hours"?"h":"d"}</td>
                       : <td style={{ fontSize:12, color:"#888" }}>{inv.issued||"—"}</td>}
                     <td style={{ fontSize:12, color:inv.status==="Overdue"?"#c62828":"#888", fontWeight:inv.status==="Overdue"?600:400 }}>{inv.due||"—"}</td>
-                    <td><span className="badge" style={{ background:statusColors[inv.status]?.bg||"#f5f5f5", color:statusColors[inv.status]?.text||"#666" }}>{inv.status||"Unknown"}</span></td>
+                    <td>
+                      <select
+                        value={inv.status||"Pending"}
+                        onChange={e => setInvoices(prev => prev.map(i => i.id===inv.id ? {...i, status:e.target.value} : i))}
+                        style={{
+                          fontFamily:"inherit", fontSize:11.5, fontWeight:600, cursor:"pointer",
+                          border:"none", borderRadius:20, padding:"3px 8px", outline:"none",
+                          background: statusColors[inv.status]?.bg || "#f5f5f5",
+                          color: statusColors[inv.status]?.text || "#666",
+                        }}>
+                        {["Pending","Paid","Overdue"].map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </td>
                     <td>
                       {editingCat === (inv.id||idx) ? (
                         <select className="cat-select" value={inv.category||""} autoFocus
@@ -1425,377 +1670,297 @@ export default function FinancialDashboard() {
           </div>
         )}
 
-        {/* ── PROJECTS ── */}
-        {activeTab === "Projects" && (
-          <div>
-            {/* Summary KPI row */}
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginBottom:20 }}>
-              {[
-                { label:"Active Projects",    value: projects.length,                                          unit:"",  color:"#1976d2" },
-                { label:"Total Revenue",      value: fmt(projects.reduce((s,p)=>s+p.totalRevenue,0)),          unit:"",  color:"#2e7d32" },
-                { label:"Total Dev Cost",     value: fmt(projects.reduce((s,p)=>s+p.totalDevCost,0)),          unit:"",  color:"#c62828" },
-                { label:"Blended Margin",     value: (() => { const r=projects.reduce((s,p)=>s+p.totalRevenue,0); const c=projects.reduce((s,p)=>s+p.totalDevCost,0); return r>0?((r-c)/r*100).toFixed(1)+"%":"—"; })(), unit:"", color:"#6a1b9a" },
-              ].map(k => (
-                <div key={k.label} className="card" style={{ padding:"16px 20px" }}>
-                  <div style={{ fontSize:11.5, color:"#aaa", fontWeight:600, textTransform:"uppercase", letterSpacing:".06em", marginBottom:6 }}>{k.label}</div>
-                  <div style={{ fontFamily:"DM Mono", fontSize:22, fontWeight:700, color:k.color }}>{k.value}</div>
-                </div>
-              ))}
-            </div>
+        {/* ── ENGAGEMENTS ── */}
+        {activeTab === "Engagements" && (() => {
+          // Build engagements: merge POs with project invoice data
+          const engagements = pos.map(po => {
+            const proj = projects.find(p => p.id === po.projectId) || null;
+            const salesInvs = invoices.filter(i => i.projectId === po.projectId && i.category === "Sales");
+            const devInvs   = invoices.filter(i => i.projectId === po.projectId && CAT_MAP[i.category]?.group === "Developers");
+            const totalBilled  = salesInvs.reduce((s,i) => s + toEUR(i.amount, i.currency), 0);
+            const totalDevCost = devInvs.reduce((s,i)  => s + toEUR(i.amount, i.currency), 0);
+            const margin       = totalBilled - totalDevCost;
+            const marginPct    = totalBilled > 0 ? (margin / totalBilled) * 100 : 0;
+            const outstanding  = salesInvs.filter(i => ["Pending","Overdue"].includes(i.status));
+            const outstandingAmt = outstanding.reduce((s,i) => s + toEUR(i.amount, i.currency), 0);
+            // Units consumed
+            const seedBurn  = (po.monthlyBurn || []).reduce((s,v) => s+v, 0);
+            const totalUnitsUsed = seedBurn;
+            const remaining = Math.max(0, po.totalUnits - totalUnitsUsed);
+            const usedPct   = Math.min(100, (totalUnitsUsed / po.totalUnits) * 100);
+            const isOver    = totalUnitsUsed > po.totalUnits;
+            const unit      = po.unitType === "hours" ? "h" : "d";
+            const billingPct = po.amount > 0 ? Math.min(100, (totalBilled / po.amount) * 100) : 0;
+            const daysUntilEnd = po.endDate ? Math.ceil((new Date(po.endDate) - new Date()) / 86400000) : null;
+            return { po, proj, salesInvs, devInvs, totalBilled, totalDevCost, margin, marginPct,
+                     outstanding, outstandingAmt, totalUnitsUsed, remaining, usedPct, isOver, unit,
+                     billingPct, daysUntilEnd };
+          });
 
-            {/* Project cards */}
-            <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-              {projects.length === 0 && (
-                <div className="card" style={{ padding:"40px", textAlign:"center", color:"#aaa", fontSize:13 }}>
-                  No projects yet. Projects are auto-created when you add Sales invoices with a client name.
-                </div>
-              )}
-              {projects.map(proj => {
-                const isExpanded = expandedProject === proj.id;
-                const marginColor = proj.marginPct >= 40 ? "#2e7d32" : proj.marginPct >= 20 ? "#f57c00" : "#c62828";
-                const marginBg    = proj.marginPct >= 40 ? "#e8f5e9" : proj.marginPct >= 20 ? "#fff8e1" : "#fce4ec";
-                const totalDays   = proj.devDaysBilled;
-                const totalHours  = proj.devHoursBilled;
+          // Summary KPIs
+          const activeEngs    = engagements.filter(e => e.po.status === "Active").length;
+          const totalBilledAll = engagements.reduce((s,e) => s+e.totalBilled, 0);
+          const totalCostAll   = engagements.reduce((s,e) => s+e.totalDevCost, 0);
+          const totalOutstanding = engagements.reduce((s,e) => s+e.outstandingAmt, 0);
+          const blendedMargin  = totalBilledAll > 0 ? ((totalBilledAll-totalCostAll)/totalBilledAll*100) : 0;
 
-                // Per-developer breakdown
-                const devBreakdown = {};
-                proj.devInvoices.forEach(inv => {
-                  const devCat = CAT_MAP[inv.category];
-                  const name = devCat?.label || inv.client || "Unknown";
-                  if (!devBreakdown[name]) devBreakdown[name] = { name, amount:0, days:0, hours:0, invoices:[], color: devCat?.color || "#999" };
-                  devBreakdown[name].amount += inv.amount||0;
-                  if (inv.devUnit === "hours") devBreakdown[name].hours += inv.devDays||0;
-                  else devBreakdown[name].days += inv.devDays||0;
-                  devBreakdown[name].invoices.push(inv);
-                });
-                const devRows = Object.values(devBreakdown);
+          const poStatusColor = s => ({ Active:{bg:"#e3f2fd",text:"#1565c0"}, Completed:{bg:"#e8f5e9",text:"#2e7d32"}, Pending:{bg:"#fff8e1",text:"#f57f17"} }[s] || {bg:"#f5f5f5",text:"#666"});
 
-                // Month-by-month revenue
-                const revenueByMonth = MONTHS.map((_, mi) =>
-                  proj.salesInvoices.filter(i => monthIndex(i.issued) === mi).reduce((s,i)=>s+(i.amount||0),0)
-                );
-                const costByMonth = MONTHS.map((_, mi) =>
-                  proj.devInvoices.filter(i => monthIndex(i.issued) === mi).reduce((s,i)=>s+(i.amount||0),0)
-                );
+          const filtered = engFilter === "All" ? engagements : engagements.filter(e => e.po.status === engFilter);
 
-                return (
-                  <div key={proj.id} className="card" style={{ overflow:"hidden" }}>
-                    {/* Project header */}
-                    <div style={{ display:"flex", alignItems:"center", gap:16, padding:"18px 22px", cursor:"pointer" }}
-                      onClick={() => setExpandedProject(isExpanded ? null : proj.id)}>
-                      <div style={{ width:40, height:40, borderRadius:10, background:"#f0f4ff", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, flexShrink:0 }}>📁</div>
-                      <div style={{ flex:1, minWidth:0 }}>
-                        <div style={{ fontWeight:700, fontSize:15, marginBottom:2 }}>{proj.name}</div>
-                        <div style={{ fontSize:12.5, color:"#aaa" }}>
-                          {proj.salesInvoices.length} sales invoice{proj.salesInvoices.length!==1?"s":""} · {proj.devInvoices.length} dev invoice{proj.devInvoices.length!==1?"s":""} · {devRows.length} developer{devRows.length!==1?"s":""}
-                          {(totalDays > 0 || totalHours > 0) && <span style={{ marginLeft:8 }}>· <strong style={{ color:"#555" }}>{totalDays>0?`${totalDays}d`:""}{totalDays>0&&totalHours>0?" + ":""}{totalHours>0?`${totalHours}h`:""}</strong> logged</span>}
-                        </div>
-                      </div>
-                      {/* Revenue / Cost / Margin pills */}
-                      <div style={{ display:"flex", gap:10, alignItems:"center", flexShrink:0 }}>
-                        <div style={{ textAlign:"right" }}>
-                          <div style={{ fontFamily:"DM Mono", fontSize:13, fontWeight:600, color:"#2e7d32" }}>{fmt(proj.totalRevenue)}</div>
-                          <div style={{ fontSize:11, color:"#aaa" }}>revenue</div>
-                        </div>
-                        <div style={{ color:"#ddd", fontSize:16 }}>−</div>
-                        <div style={{ textAlign:"right" }}>
-                          <div style={{ fontFamily:"DM Mono", fontSize:13, fontWeight:600, color:"#c62828" }}>{fmt(proj.totalDevCost)}</div>
-                          <div style={{ fontSize:11, color:"#aaa" }}>dev cost</div>
-                        </div>
-                        <div style={{ color:"#ddd", fontSize:16 }}>=</div>
-                        <div style={{ textAlign:"center", background:marginBg, borderRadius:10, padding:"6px 14px" }}>
-                          <div style={{ fontFamily:"DM Mono", fontSize:14, fontWeight:700, color:marginColor }}>{fmt(proj.margin)}</div>
-                          <div style={{ fontSize:11, color:marginColor, fontWeight:600 }}>{proj.marginPct.toFixed(1)}% margin</div>
-                        </div>
-                      </div>
-                      <div style={{ fontSize:18, color:"#ccc", userSelect:"none", marginLeft:8 }}>{isExpanded ? "▲" : "▼"}</div>
-                    </div>
-
-                    {/* Expanded detail */}
-                    {isExpanded && (
-                      <div style={{ borderTop:"1px solid #f0eeea" }}>
-
-                        {/* Monthly revenue vs cost bars */}
-                        <div style={{ padding:"18px 22px 14px", borderBottom:"1px solid #f0eeea" }}>
-                          <div style={{ fontWeight:600, fontSize:13, color:"#555", marginBottom:14 }}>Monthly: Revenue vs Dev Cost</div>
-                          <div style={{ display:"flex", gap:6, alignItems:"flex-end", height:90 }}>
-                            {MONTHS.map((m, i) => {
-                              const rev  = revenueByMonth[i];
-                              const cost = costByMonth[i];
-                              const maxV = Math.max(...revenueByMonth, ...costByMonth, 1);
-                              return (
-                                <div key={m} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:3 }}>
-                                  <div style={{ width:"100%", display:"flex", gap:2, alignItems:"flex-end", height:64 }}>
-                                    <div style={{ flex:1, borderRadius:"3px 3px 0 0", background:"#43a047", height:`${(rev/maxV)*100}%`, minHeight: rev>0?4:0, transition:"height .4s" }} title={`Revenue: ${fmt(rev)}`}/>
-                                    <div style={{ flex:1, borderRadius:"3px 3px 0 0", background:"#ef5350", height:`${(cost/maxV)*100}%`, minHeight: cost>0?4:0, transition:"height .4s" }} title={`Dev cost: ${fmt(cost)}`}/>
-                                  </div>
-                                  <div style={{ fontSize:10.5, color:"#aaa" }}>{m}</div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                          <div style={{ display:"flex", gap:16, marginTop:8, fontSize:11.5, color:"#888" }}>
-                            <span><span style={{ display:"inline-block", width:10, height:10, borderRadius:2, background:"#43a047", marginRight:4 }}/>Revenue</span>
-                            <span><span style={{ display:"inline-block", width:10, height:10, borderRadius:2, background:"#ef5350", marginRight:4 }}/>Dev Cost</span>
-                          </div>
-                        </div>
-
-                        {/* Developer breakdown table */}
-                        <div style={{ padding:"16px 22px", borderBottom:"1px solid #f0eeea" }}>
-                          <div style={{ fontWeight:600, fontSize:13, color:"#555", marginBottom:10 }}>Developer Breakdown</div>
-                          {devRows.length === 0 ? (
-                            <div style={{ fontSize:13, color:"#bbb", fontStyle:"italic" }}>No developer invoices linked yet. Go to Invoices tab and use the "Link project" button on developer invoice rows.</div>
-                          ) : (
-                            <table className="tbl">
-                              <thead>
-                                <tr>
-                                  <th>Developer</th>
-                                  <th style={{ textAlign:"right" }}>Dev Cost</th>
-                                  <th style={{ textAlign:"right" }}>Days logged</th>
-                                  <th style={{ textAlign:"right" }}>Hours logged</th>
-                                  <th style={{ textAlign:"right" }}>Effective rate</th>
-                                  <th>Invoices</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {devRows.map((dev, di) => {
-                                  const rate = dev.days > 0 ? dev.amount / dev.days : dev.hours > 0 ? dev.amount / dev.hours : null;
-                                  return (
-                                    <tr key={di}>
-                                      <td><span style={{ display:"inline-flex", alignItems:"center", gap:6 }}><span style={{ width:8, height:8, borderRadius:"50%", background:dev.color, display:"inline-block" }}/><strong>{dev.name}</strong></span></td>
-                                      <td className="num" style={{ color:"#c62828", fontWeight:600 }}>{fmt(dev.amount)}</td>
-                                      <td className="num">{dev.days > 0 ? `${dev.days}d` : "—"}</td>
-                                      <td className="num">{dev.hours > 0 ? `${dev.hours}h` : "—"}</td>
-                                      <td className="num" style={{ color:"#888", fontSize:12 }}>{rate ? `${fmt(rate)}/${dev.days>0?"d":"h"}` : "—"}</td>
-                                      <td style={{ fontSize:12, color:"#aaa" }}>{dev.invoices.map(i=>i.id).join(", ")}</td>
-                                    </tr>
-                                  );
-                                })}
-                                {/* Totals row */}
-                                <tr style={{ background:"#fafaf8" }}>
-                                  <td style={{ fontWeight:700 }}>Total</td>
-                                  <td className="num" style={{ fontWeight:700, color:"#c62828" }}>{fmt(proj.totalDevCost)}</td>
-                                  <td className="num" style={{ fontWeight:700 }}>{totalDays > 0 ? `${totalDays}d` : "—"}</td>
-                                  <td className="num" style={{ fontWeight:700 }}>{totalHours > 0 ? `${totalHours}h` : "—"}</td>
-                                  <td/><td/>
-                                </tr>
-                              </tbody>
-                            </table>
-                          )}
-                        </div>
-
-                        {/* Sales invoices */}
-                        <div style={{ padding:"16px 22px" }}>
-                          <div style={{ fontWeight:600, fontSize:13, color:"#555", marginBottom:10 }}>Sales Invoices</div>
-                          <table className="tbl">
-                            <thead>
-                              <tr>
-                                <th>Invoice #</th><th>Amount</th><th>Issued</th><th>Due</th><th>Status</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {proj.salesInvoices.map((inv, ii) => (
-                                <tr key={ii}>
-                                  <td style={{ fontFamily:"DM Mono", fontSize:12, color:"#666" }}>{inv.id}</td>
-                                  <td className="num" style={{ fontWeight:600, color:"#2e7d32" }}>{fmt(inv.amount)}</td>
-                                  <td style={{ fontSize:12, color:"#888" }}>{inv.issued}</td>
-                                  <td style={{ fontSize:12, color:"#888" }}>{inv.due}</td>
-                                  <td><span className="badge" style={{ background:statusColors[inv.status]?.bg||"#f5f5f5", color:statusColors[inv.status]?.text||"#666" }}>{inv.status}</span></td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-
-                      </div>
-                    )}
+          return (
+            <div>
+              {/* KPI row */}
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginBottom:20 }}>
+                {[
+                  { label:"Active Engagements", value:activeEngs,                       mono:false, color:"#1565c0" },
+                  { label:"Total Billed",        value:fmt(totalBilledAll),              mono:true,  color:"#2e7d32" },
+                  { label:"Blended Margin",      value:blendedMargin.toFixed(1)+"%",     mono:true,  color: blendedMargin>30?"#2e7d32":blendedMargin>15?"#f57c00":"#c62828" },
+                  { label:"Outstanding",         value:fmt(totalOutstanding),            mono:true,  color:"#f57c00" },
+                ].map(k => (
+                  <div key={k.label} className="card" style={{ padding:"16px 20px" }}>
+                    <div style={{ fontSize:11, fontWeight:600, color:"#aaa", textTransform:"uppercase", letterSpacing:".07em", marginBottom:6 }}>{k.label}</div>
+                    <div style={{ fontFamily: k.mono?"DM Mono":undefined, fontSize:22, fontWeight:700, color:k.color }}>{k.value}</div>
                   </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* ── PURCHASE ORDERS ── */}
-        {activeTab === "Purchase Orders" && (
-          <div>
-            {/* Filters */}
-            <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap", alignItems:"center" }}>
-              {["All","Active","Completed","Pending"].map(f => (
-                <button key={f} className={`filter-btn${poFilter===f?" active":""}`} onClick={() => setPoFilter(f)}>{f}</button>
-              ))}
-              <div style={{ marginLeft:"auto", fontSize:12.5, color:"#aaa" }}>
-                {filteredPOs.length} POs · <strong style={{ color:"#1a1a1a", fontFamily:"DM Mono" }}>{fmt(filteredPOs.reduce((s,p) => s+p.amount, 0))}</strong>
+                ))}
               </div>
-            </div>
 
-            {/* PO Cards */}
-            <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-              {filteredPOs.map(po => {
-                const usage     = poUsage[po.id] || { invoiceUnits:0, invoiceAmount:0, linkedInvoices:[] };
-                const seedBurn  = (po.monthlyBurn || []).reduce((s,v) => s+v, 0);
-                const totalUsed = seedBurn + usage.invoiceUnits;
-                const remaining = Math.max(0, po.totalUnits - totalUsed);
-                const usedPct   = Math.min(100, (totalUsed / po.totalUnits) * 100);
-                const isOver    = totalUsed > po.totalUnits;
-                const unit      = po.unitType === "hours" ? "h" : "d";
-                const isExpanded= expandedPO === po.id;
+              {/* Filters */}
+              <div style={{ display:"flex", gap:6, marginBottom:16, alignItems:"center" }}>
+                {["All","Active","Completed","Pending"].map(f => (
+                  <button key={f} className={`filter-btn${engFilter===f?" active":""}`} onClick={() => setEngFilter(f)}>{f}</button>
+                ))}
+                <span style={{ marginLeft:"auto", fontSize:12.5, color:"#aaa" }}>
+                  {filtered.length} engagement{filtered.length!==1?"s":""} · <strong style={{ color:"#1a1a1a", fontFamily:"DM Mono" }}>{fmt(filtered.reduce((s,e)=>s+e.po.amount,0))}</strong> total PO value
+                </span>
+              </div>
 
-                const poStatusColor = {
-                  Active:    { bg:"#e3f2fd", text:"#1565c0" },
-                  Completed: { bg:"#e8f5e9", text:"#2e7d32" },
-                  Pending:   { bg:"#fff8e1", text:"#f57f17" },
-                }[po.status] || { bg:"#f5f5f5", text:"#666" };
+              {/* Engagement cards */}
+              <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                {filtered.map(eng => {
+                  const { po, salesInvs, devInvs, totalBilled, totalDevCost, margin, marginPct,
+                          outstanding, outstandingAmt, totalUnitsUsed, remaining, usedPct,
+                          isOver, unit, billingPct, daysUntilEnd } = eng;
+                  const isExpanded = expandedPO === po.id;
+                  const sc = poStatusColor(po.status);
+                  const marginColor = marginPct > 30 ? "#2e7d32" : marginPct > 15 ? "#f57c00" : "#c62828";
+                  const marginBg    = marginPct > 30 ? "#f0faf2" : marginPct > 15 ? "#fff8e1" : "#fce4ec";
+                  const billingBarColor = billingPct > 90 ? "#c62828" : billingPct > 70 ? "#f57c00" : "#1976d2";
+                  const capacityBarColor = isOver ? "#c62828" : usedPct > 80 ? "#f57c00" : "#4caf50";
 
-                const barColor = isOver ? "#c62828" : usedPct > 80 ? "#f57c00" : "#1976d2";
+                  return (
+                    <div key={po.id} className="card" style={{ overflow:"hidden" }}>
 
-                // Burndown: seed monthly burn + invoice-linked burn (simplified: spread invoice units across months)
-                const burnByMonth = MONTHS.map((_, i) => po.monthlyBurn?.[i] || 0);
-
-                return (
-                  <div key={po.id} className="card" style={{ overflow:"hidden" }}>
-                    {/* PO Header row */}
-                    <div style={{ display:"flex", alignItems:"center", gap:14, padding:"16px 20px", cursor:"pointer" }}
-                      onClick={() => setExpandedPO(isExpanded ? null : po.id)}>
-                      <div style={{ flex:1, minWidth:0 }}>
-                        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4 }}>
-                          <span style={{ fontFamily:"DM Mono", fontSize:12, color:"#888" }}>{po.id}</span>
-                          <span className="badge" style={{ background:poStatusColor.bg, color:poStatusColor.text }}>{po.status}</span>
-                          {isOver && <span className="badge" style={{ background:"#fce4ec", color:"#c62828" }}>⚠ Over budget</span>}
+                      {/* ── Card header ── */}
+                      <div style={{ display:"flex", alignItems:"center", gap:14, padding:"18px 22px", cursor:"pointer" }}
+                        onClick={() => setExpandedPO(isExpanded ? null : po.id)}>
+                        <div style={{ flex:1, minWidth:0 }}>
+                          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4, flexWrap:"wrap" }}>
+                            <span style={{ fontFamily:"DM Mono", fontSize:11.5, color:"#aaa" }}>{po.id}</span>
+                            <span className="badge" style={{ background:sc.bg, color:sc.text }}>{po.status}</span>
+                            {isOver && <span className="badge" style={{ background:"#fce4ec", color:"#c62828" }}>⚠ Over capacity</span>}
+                            {outstanding.length > 0 && <span className="badge" style={{ background:"#fff8e1", color:"#f57f17" }}>⏳ {outstanding.length} outstanding</span>}
+                          </div>
+                          <div style={{ fontWeight:700, fontSize:15 }}>{po.client}</div>
+                          <div style={{ fontSize:12.5, color:"#888", marginTop:2 }}>{po.description}</div>
+                          <div style={{ fontSize:11.5, color:"#bbb", marginTop:3, display:"flex", gap:12 }}>
+                            <span>📅 {po.startDate} → {po.endDate}</span>
+                            {daysUntilEnd !== null && po.status === "Active" && (
+                              <span style={{ color: daysUntilEnd < 14 ? "#c62828" : daysUntilEnd < 30 ? "#f57c00" : "#aaa", fontWeight: daysUntilEnd < 30 ? 600 : 400 }}>
+                                {daysUntilEnd < 0 ? "⚠ Expired" : `${daysUntilEnd}d remaining`}
+                              </span>
+                            )}
+                          </div>
                         </div>
-                        <div style={{ fontWeight:600, fontSize:14 }}>{po.description}</div>
-                        <div style={{ fontSize:12.5, color:"#888", marginTop:2 }}>{po.vendor} · {po.ordered} → {po.expected}</div>
-                      </div>
 
-                      {/* Capacity summary */}
-                      <div style={{ textAlign:"right", minWidth:100 }}>
-                        <div style={{ fontFamily:"DM Mono", fontSize:20, fontWeight:700, color: isOver?"#c62828":"#1a1a1a" }}>
-                          {Math.round(remaining)}{unit}
+                        {/* Right-side summary pills */}
+                        <div style={{ display:"flex", gap:12, alignItems:"center", flexShrink:0, flexWrap:"wrap", justifyContent:"flex-end" }}>
+                          <div style={{ textAlign:"right" }}>
+                            <div style={{ fontFamily:"DM Mono", fontSize:13, fontWeight:600, color:"#2e7d32" }}>{fmt(totalBilled)}</div>
+                            <div style={{ fontSize:11, color:"#aaa" }}>billed of {fmt(po.amount)}</div>
+                          </div>
+                          <div style={{ color:"#ddd" }}>·</div>
+                          <div style={{ textAlign:"right" }}>
+                            <div style={{ fontFamily:"DM Mono", fontSize:13, fontWeight:600, color:"#c62828" }}>{fmt(totalDevCost)}</div>
+                            <div style={{ fontSize:11, color:"#aaa" }}>dev cost</div>
+                          </div>
+                          <div style={{ color:"#ddd" }}>·</div>
+                          <div style={{ background:marginBg, borderRadius:10, padding:"6px 14px", textAlign:"center" }}>
+                            <div style={{ fontFamily:"DM Mono", fontSize:14, fontWeight:700, color:marginColor }}>{fmt(margin)}</div>
+                            <div style={{ fontSize:11, color:marginColor, fontWeight:600 }}>{marginPct.toFixed(1)}% margin</div>
+                          </div>
+                          <div style={{ textAlign:"right", minWidth:70 }}>
+                            <div style={{ fontFamily:"DM Mono", fontSize:18, fontWeight:700, color: isOver?"#c62828":"#1a1a1a" }}>{Math.round(remaining)}{unit}</div>
+                            <div style={{ fontSize:11, color:"#aaa" }}>left of {po.totalUnits}{unit}</div>
+                          </div>
                         </div>
-                        <div style={{ fontSize:11.5, color:"#aaa" }}>remaining</div>
+                        <div style={{ fontSize:18, color:"#ccc", userSelect:"none", marginLeft:4 }}>{isExpanded?"▲":"▼"}</div>
                       </div>
 
-                      {/* Amount */}
-                      <div style={{ textAlign:"right", minWidth:90 }}>
-                        <div style={{ fontFamily:"DM Mono", fontSize:14, fontWeight:600 }}>{fmt(po.amount)}</div>
-                        <div style={{ fontSize:11.5, color:"#aaa" }}>{po.totalUnits}{unit} total</div>
+                      {/* ── Progress bars ── */}
+                      <div style={{ padding:"0 22px 16px", display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+                        {/* Billing burn */}
+                        <div>
+                          <div style={{ display:"flex", justifyContent:"space-between", fontSize:11.5, color:"#aaa", marginBottom:5 }}>
+                            <span>💰 Billing burn</span>
+                            <span style={{ color:billingBarColor, fontWeight:600 }}>{billingPct.toFixed(1)}% of PO value</span>
+                          </div>
+                          <div style={{ height:8, borderRadius:4, background:"#eceae6", overflow:"hidden" }}>
+                            <div style={{ height:"100%", borderRadius:4, background:billingBarColor, width:`${billingPct}%`, transition:"width .5s" }}/>
+                          </div>
+                          <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"#bbb", marginTop:3 }}>
+                            <span>{fmt(totalBilled)} billed</span><span>{fmt(po.amount)} total</span>
+                          </div>
+                        </div>
+                        {/* Capacity burn */}
+                        <div>
+                          <div style={{ display:"flex", justifyContent:"space-between", fontSize:11.5, color:"#aaa", marginBottom:5 }}>
+                            <span>⏱ Capacity used</span>
+                            <span style={{ color:capacityBarColor, fontWeight:600 }}>{usedPct.toFixed(1)}% consumed</span>
+                          </div>
+                          <div style={{ height:8, borderRadius:4, background:"#eceae6", overflow:"hidden" }}>
+                            <div style={{ height:"100%", borderRadius:4, background:capacityBarColor, width:`${usedPct}%`, transition:"width .5s" }}/>
+                          </div>
+                          <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"#bbb", marginTop:3 }}>
+                            <span>{Math.round(totalUnitsUsed)}{unit} used</span><span>{po.totalUnits}{unit} total</span>
+                          </div>
+                        </div>
                       </div>
 
-                      <div style={{ fontSize:18, color:"#ccc", userSelect:"none" }}>{isExpanded ? "▲" : "▼"}</div>
-                    </div>
+                      {/* ── Expanded detail ── */}
+                      {isExpanded && (
+                        <div style={{ borderTop:"1px solid #f0eeea" }}>
 
-                    {/* Capacity bar */}
-                    <div style={{ padding:"0 20px 16px" }}>
-                      <div style={{ display:"flex", justifyContent:"space-between", fontSize:11.5, color:"#aaa", marginBottom:5 }}>
-                        <span>Used: <strong style={{ color:"#555" }}>{Math.round(totalUsed)}{unit}</strong> of {po.totalUnits}{unit}</span>
-                        <span style={{ color: barColor, fontWeight:600 }}>{usedPct.toFixed(1)}% consumed</span>
-                      </div>
-                      <div style={{ height:10, borderRadius:5, background:"#eceae6", overflow:"hidden" }}>
-                        <div style={{ height:"100%", borderRadius:5, background: barColor, width:`${usedPct}%`, transition:"width .5s" }}/>
-                      </div>
-                      <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"#bbb", marginTop:4 }}>
-                        <span>0{unit}</span>
-                        <span style={{ color: remaining <= po.totalUnits * 0.2 ? "#f57c00" : "#bbb" }}>
-                          {remaining <= po.totalUnits * 0.2 && remaining > 0 ? "⚠ " : ""}{Math.round(remaining)}{unit} left
-                        </span>
-                        <span>{po.totalUnits}{unit}</span>
-                      </div>
-                    </div>
-
-                    {/* Expanded: burndown + linked invoices */}
-                    {isExpanded && (
-                      <div style={{ borderTop:"1px solid #f0eeea" }}>
-                        {/* Monthly burndown chart */}
-                        <div style={{ padding:"18px 20px 14px", borderBottom:"1px solid #f0eeea" }}>
-                          <div style={{ fontWeight:600, fontSize:13, marginBottom:14, color:"#555" }}>Monthly Burndown ({unit})</div>
-                          <div style={{ display:"flex", gap:6, alignItems:"flex-end", height:80 }}>
-                            {MONTHS.map((m, i) => {
-                              const val     = burnByMonth[i] || 0;
-                              const maxBurn = Math.max(...burnByMonth, 1);
-                              const heightPct = (val / maxBurn) * 100;
-                              // cumulative so far
-                              const cumUsed = burnByMonth.slice(0,i+1).reduce((s,v)=>s+v,0);
-                              const isWarning = cumUsed / po.totalUnits > 0.8;
-                              return (
-                                <div key={m} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:4 }}>
-                                  <div style={{ fontSize:10, color:"#aaa", fontFamily:"DM Mono" }}>{val>0?val:""}</div>
-                                  <div style={{ width:"100%", display:"flex", alignItems:"flex-end", height:52 }}>
-                                    <div style={{
-                                      width:"100%", borderRadius:"3px 3px 0 0",
-                                      background: val===0 ? "#f0eeea" : isWarning ? "#ff9800" : "#1976d2",
-                                      height:`${val===0?8:heightPct}%`,
-                                      minHeight: val===0 ? 4 : 8,
-                                      transition:"height .4s",
-                                    }}/>
+                          {/* Monthly burndown */}
+                          <div style={{ padding:"18px 22px 14px", borderBottom:"1px solid #f0eeea" }}>
+                            <div style={{ fontWeight:600, fontSize:13, color:"#555", marginBottom:14 }}>Monthly Capacity Burndown ({unit})</div>
+                            <div style={{ display:"flex", gap:6, alignItems:"flex-end", height:80 }}>
+                              {MONTHS.map((m, i) => {
+                                const val = po.monthlyBurn?.[i] || 0;
+                                const maxBurn = Math.max(...(po.monthlyBurn||[]), 1);
+                                const cum = (po.monthlyBurn||[]).slice(0,i+1).reduce((s,v)=>s+v,0);
+                                const isWarn = cum / po.totalUnits > 0.8;
+                                return (
+                                  <div key={m} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:3 }}>
+                                    <div style={{ fontSize:10, color:"#aaa", fontFamily:"DM Mono" }}>{val>0?val:""}</div>
+                                    <div style={{ width:"100%", display:"flex", alignItems:"flex-end", height:52 }}>
+                                      <div style={{ width:"100%", borderRadius:"3px 3px 0 0", background: val===0?"#f0eeea":isWarn?"#ff9800":"#1976d2", height:`${val===0?8:(val/maxBurn)*100}%`, minHeight:val===0?4:8, transition:"height .4s" }}/>
+                                    </div>
+                                    <div style={{ fontSize:10.5, color:"#aaa" }}>{m}</div>
                                   </div>
-                                  <div style={{ fontSize:10.5, color:"#aaa" }}>{m}</div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                          {/* Cumulative progress line labels */}
-                          <div style={{ display:"flex", gap:6, marginTop:8 }}>
-                            {MONTHS.map((m, i) => {
-                              const cum = burnByMonth.slice(0,i+1).reduce((s,v)=>s+v,0);
-                              return (
-                                <div key={m} style={{ flex:1, textAlign:"center", fontSize:10, fontFamily:"DM Mono", color: cum/po.totalUnits > 0.8 ? "#f57c00" : "#bbb" }}>
-                                  {cum}{unit}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-
-                        {/* Linked invoices */}
-                        <div style={{ padding:"14px 20px" }}>
-                          <div style={{ fontWeight:600, fontSize:13, marginBottom:10, color:"#555" }}>
-                            Linked Invoices
-                            {usage.linkedInvoices.length > 0 &&
-                              <span style={{ marginLeft:8, fontSize:12, fontWeight:400, color:"#aaa" }}>
-                                {usage.linkedInvoices.length} invoice{usage.linkedInvoices.length!==1?"s":""} · {fmt(usage.invoiceAmount)} billed
-                              </span>}
-                          </div>
-                          {usage.linkedInvoices.length === 0 ? (
-                            <div style={{ fontSize:13, color:"#bbb", fontStyle:"italic" }}>
-                              No invoices linked yet — go to the Invoices tab and use the "Link PO" column to connect invoices.
+                                );
+                              })}
                             </div>
-                          ) : (
-                            <table className="tbl" style={{ fontSize:12.5 }}>
-                              <thead>
-                                <tr>
-                                  <th>Invoice #</th><th>Client</th>
-                                  <th style={{ textAlign:"right" }}>Amount</th>
-                                  <th style={{ textAlign:"right" }}>Units consumed</th>
-                                  <th>Date</th><th>Status</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {usage.linkedInvoices.map((inv, ii) => {
-                                  const ratePerUnit = po.amount / po.totalUnits;
-                                  const units = ratePerUnit > 0 ? ((inv.amount||0) / ratePerUnit).toFixed(1) : "—";
-                                  return (
+                          </div>
+
+                          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", borderBottom:"1px solid #f0eeea" }}>
+
+                            {/* Sales invoices */}
+                            <div style={{ padding:"16px 22px", borderRight:"1px solid #f0eeea" }}>
+                              <div style={{ fontWeight:600, fontSize:13, color:"#2e7d32", marginBottom:10 }}>
+                                💰 Sales Invoices
+                                <span style={{ fontSize:12, fontWeight:400, color:"#aaa", marginLeft:8 }}>{salesInvs.length} total · {fmt(totalBilled)}</span>
+                              </div>
+                              {salesInvs.length === 0 ? (
+                                <div style={{ fontSize:12.5, color:"#bbb", fontStyle:"italic" }}>No sales invoices linked yet</div>
+                              ) : (
+                                <table className="tbl">
+                                  <thead><tr><th>Invoice #</th><th style={{textAlign:"right"}}>Amount</th><th>Issued</th><th>Due</th><th>Status</th></tr></thead>
+                                  <tbody>
+                                    {salesInvs.map((inv,ii) => (
+                                      <tr key={ii}>
+                                        <td style={{ fontFamily:"DM Mono", fontSize:11.5, color:"#666" }}>{inv.id}</td>
+                                        <td className="num" style={{ fontWeight:600, color:"#2e7d32" }}>
+                                          {fmt(toEUR(inv.amount, inv.currency))}
+                                          {inv.currency !== "EUR" && <div style={{ fontSize:10, color:"#bbb" }}>{CUR_SYMBOLS[inv.currency]||""}{Math.round(inv.amount).toLocaleString("de-DE")} {inv.currency}</div>}
+                                        </td>
+                                        <td style={{ fontSize:11.5, color:"#888" }}>{inv.issued||"—"}</td>
+                                        <td style={{ fontSize:11.5, color: inv.status==="Overdue"?"#c62828":"#888", fontWeight:inv.status==="Overdue"?600:400 }}>{inv.due||"—"}</td>
+                                        <td><span className="badge" style={{ background:statusColors[inv.status]?.bg||"#f5f5f5", color:statusColors[inv.status]?.text||"#666" }}>{inv.status}</span></td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              )}
+                            </div>
+
+                            {/* Dev invoices */}
+                            <div style={{ padding:"16px 22px" }}>
+                              <div style={{ fontWeight:600, fontSize:13, color:"#c62828", marginBottom:10 }}>
+                                👨‍💻 Developer Invoices
+                                <span style={{ fontSize:12, fontWeight:400, color:"#aaa", marginLeft:8 }}>{devInvs.length} total · {fmt(totalDevCost)}</span>
+                              </div>
+                              {devInvs.length === 0 ? (
+                                <div style={{ fontSize:12.5, color:"#bbb", fontStyle:"italic" }}>No developer invoices linked yet</div>
+                              ) : (
+                                <table className="tbl">
+                                  <thead><tr><th>Developer</th><th>Days/Hrs</th><th style={{textAlign:"right"}}>Amount</th><th>Issued</th><th>Status</th></tr></thead>
+                                  <tbody>
+                                    {devInvs.map((inv,ii) => (
+                                      <tr key={ii}>
+                                        <td style={{ fontWeight:500, fontSize:12.5 }}>{inv.client||"—"}</td>
+                                        <td style={{ fontFamily:"DM Mono", fontSize:12, color:"#666" }}>{inv.devDays}{inv.devUnit==="hours"?"h":"d"}</td>
+                                        <td className="num" style={{ fontWeight:600, color:"#c62828" }}>
+                                          {fmt(toEUR(inv.amount, inv.currency))}
+                                          {inv.currency !== "EUR" && <div style={{ fontSize:10, color:"#bbb" }}>{CUR_SYMBOLS[inv.currency]||""}{Math.round(inv.amount).toLocaleString("de-DE")} {inv.currency}</div>}
+                                        </td>
+                                        <td style={{ fontSize:11.5, color:"#888" }}>{inv.issued||"—"}</td>
+                                        <td><span className="badge" style={{ background:statusColors[inv.status]?.bg||"#f5f5f5", color:statusColors[inv.status]?.text||"#666" }}>{inv.status}</span></td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              )}
+
+                              {/* Balance check */}
+                              {(salesInvs.length > 0 || devInvs.length > 0) && (
+                                <div style={{ marginTop:14, padding:"12px 14px", borderRadius:8, background: marginPct > 30 ? "#f0faf2" : marginPct > 15 ? "#fff8e1" : "#fce4ec", border:`1px solid ${marginPct>30?"#c8e6c9":marginPct>15?"#ffe082":"#ffcdd2"}` }}>
+                                  <div style={{ fontSize:11.5, fontWeight:600, color:"#555", marginBottom:6 }}>⚖ Balance Check</div>
+                                  <div style={{ display:"flex", gap:16, fontSize:12, fontFamily:"DM Mono" }}>
+                                    <span style={{ color:"#2e7d32" }}>Revenue: {fmt(totalBilled)}</span>
+                                    <span style={{ color:"#aaa" }}>−</span>
+                                    <span style={{ color:"#c62828" }}>Dev cost: {fmt(totalDevCost)}</span>
+                                    <span style={{ color:"#aaa" }}>=</span>
+                                    <span style={{ fontWeight:700, color:marginColor }}>Margin: {fmt(margin)} ({marginPct.toFixed(1)}%)</span>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+
+                          </div>
+
+                          {/* Outstanding invoices */}
+                          {outstanding.length > 0 && (
+                            <div style={{ padding:"14px 22px" }}>
+                              <div style={{ fontWeight:600, fontSize:13, color:"#f57f17", marginBottom:10 }}>
+                                ⏳ Outstanding · Awaiting Payment
+                                <span style={{ fontSize:12, fontWeight:400, color:"#aaa", marginLeft:8 }}>{fmt(outstandingAmt)}</span>
+                              </div>
+                              <table className="tbl">
+                                <thead><tr><th>Invoice #</th><th style={{textAlign:"right"}}>Amount</th><th>Due</th><th>Status</th></tr></thead>
+                                <tbody>
+                                  {outstanding.map((inv,ii) => (
                                     <tr key={ii}>
-                                      <td style={{ fontFamily:"DM Mono", color:"#666" }}>{inv.id||"—"}</td>
-                                      <td style={{ fontWeight:500 }}>{inv.client||"—"}</td>
-                                      <td className="num" style={{ fontWeight:600 }}>{fmt(inv.amount)}</td>
-                                      <td className="num" style={{ color:"#1976d2", fontWeight:600 }}>{units}{unit}</td>
-                                      <td style={{ color:"#888" }}>{inv.issued||"—"}</td>
+                                      <td style={{ fontFamily:"DM Mono", fontSize:11.5, color:"#666" }}>{inv.id}</td>
+                                      <td className="num" style={{ fontWeight:600 }}>{fmt(toEUR(inv.amount, inv.currency))}</td>
+                                      <td style={{ fontSize:12, color: inv.status==="Overdue"?"#c62828":"#888", fontWeight:inv.status==="Overdue"?600:400 }}>{inv.due||"—"}</td>
                                       <td><span className="badge" style={{ background:statusColors[inv.status]?.bg||"#f5f5f5", color:statusColors[inv.status]?.text||"#666" }}>{inv.status}</span></td>
                                     </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
                           )}
+
                         </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
       </div>
     </div>
