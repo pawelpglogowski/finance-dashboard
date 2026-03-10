@@ -277,26 +277,32 @@ async function spRequest(token, path, options = {}) {
 
 async function getDriveId(token, siteId) {
   const data = await spRequest(token, `/sites/${siteId}/drives`);
-  // Prefer "Documents" or first documentLibrary, fall back to first drive
-  const drive = data.value.find(d => d.name === "Documents")
-    || data.value.find(d => d.driveType === "documentLibrary")
-    || data.value[0];
-  if (!drive) throw new Error(`No drives found on site. Available: ${JSON.stringify(data.value?.map(d=>d.name))}`);
+  const drives = data.value || [];
+  if (drives.length === 0) throw new Error(`No drives found on site ${siteId}`);
+  // Log available drives for debugging
+  console.log("Available drives:", drives.map(d => `${d.name} (${d.driveType})`));
+  const drive = drives.find(d => d.name === "Documents")
+    || drives.find(d => d.driveType === "documentLibrary")
+    || drives[0];
+  if (!drive) throw new Error(`No usable drive found. Drives: ${drives.map(d=>d.name).join(", ")}`);
   return drive.id;
 }
 
 async function getSiteId(token) {
-  // Try direct site lookup first
   try {
-    const data = await spRequest(token, `/sites/nelem.sharepoint.com:/sites/allcompany`);
-    return data.id;
-  } catch (e) {
-    // Fallback: search for the site
-    const data = await spRequest(token, `/sites?search=allcompany`);
-    const site = data.value?.[0];
-    if (!site) throw new Error("Could not find SharePoint site 'allcompany'");
-    return site.id;
-  }
+    const data = await spRequest(token, `/sites/nelem.sharepoint.com,sites,allcompany`);
+    if (data.id) return data.id;
+  } catch(e) { console.log("Site lookup attempt 1 failed:", e.message); }
+  try {
+    const data = await spRequest(token, `/sites/nelem.sharepoint.com:/sites/allcompany:`);
+    if (data.id) return data.id;
+  } catch(e) { console.log("Site lookup attempt 2 failed:", e.message); }
+  // Last resort: search
+  const data = await spRequest(token, `/sites?search=allcompany`);
+  const site = data.value?.[0];
+  if (!site) throw new Error("Could not find SharePoint site 'allcompany' — check permissions");
+  console.log("Found site via search:", site.displayName, site.id);
+  return site.id;
 }
 
 async function listFolderFiles(token, driveId, folderPath) {
@@ -463,8 +469,15 @@ export default function FinancialDashboard() {
 
     try {
       log("Connecting to SharePoint...");
-      const { driveId } = await initSpIds(spToken);
-      log(`✅ Connected to SharePoint (drive: ${driveId.slice(0,12)}...)`);
+      let siteId, driveId;
+      try {
+        const ids = await initSpIds(spToken);
+        siteId = ids.siteId;
+        driveId = ids.driveId;
+        log(`✅ Connected (drive: ${driveId.slice(0,12)}...)`);
+      } catch(e) {
+        throw new Error(`Step 1 - getSiteId/getDriveId failed: ${e.message}`);
+      }
 
       // Load existing saved data
       log("Loading saved dashboard data...");
