@@ -181,6 +181,112 @@ Category options (pick the single best match):
   return JSON.parse(text.replace(/```json|```/g, "").trim());
 }
 
+// ── SharePoint / Microsoft identity config ───────────────────────────────────
+const SP_CONFIG = {
+  clientId:   "9151d8bd-8348-4686-8273-7192ed96ad44",
+  tenantId:   "5f5523a6-37c8-4aaf-8205-75ac338e4678",
+  siteUrl:    "https://nelem.sharepoint.com/sites/allcompany",
+  basePath:   "/Nelem/NELEM SOLUTIONS/AA_FAKTURY/Nelem Solutions - spółka/FAKTURY",
+  salesPath:  "/Nelem/NELEM SOLUTIONS/AA_FAKTURY/Nelem Solutions - spółka/FAKTURY/Sales",
+  costsPath:  "/Nelem/NELEM SOLUTIONS/AA_FAKTURY/Nelem Solutions - spółka/FAKTURY/Costs",
+  dataFile:   "/Nelem/NELEM SOLUTIONS/AA_FAKTURY/Nelem Solutions - spółka/FAKTURY/dashboard-data.json",
+  scopes:     ["https://graph.microsoft.com/Files.ReadWrite", "https://graph.microsoft.com/Sites.Selected", "https://graph.microsoft.com/User.Read"],
+};
+
+// ── MSAL auth helpers ────────────────────────────────────────────────────────
+async function msalLogin() {
+  const authUrl = `https://login.microsoftonline.com/${SP_CONFIG.tenantId}/oauth2/v2.0/authorize?`
+    + `client_id=${SP_CONFIG.clientId}`
+    + `&response_type=token`
+    + `&redirect_uri=${encodeURIComponent(window.location.origin + window.location.pathname)}`
+    + `&scope=${encodeURIComponent(SP_CONFIG.scopes.join(" "))}`
+    + `&response_mode=fragment`
+    + `&nonce=${Math.random().toString(36).slice(2)}`;
+  window.location.href = authUrl;
+}
+
+function getTokenFromHash() {
+  const hash = window.location.hash.substring(1);
+  const params = new URLSearchParams(hash);
+  const token = params.get("access_token");
+  const expiresIn = params.get("expires_in");
+  if (token) {
+    const expiry = Date.now() + parseInt(expiresIn || "3600") * 1000;
+    sessionStorage.setItem("sp_token", token);
+    sessionStorage.setItem("sp_token_expiry", expiry);
+    window.location.hash = ""; // clean URL
+    return token;
+  }
+  return null;
+}
+
+function getSavedToken() {
+  const token = sessionStorage.getItem("sp_token");
+  const expiry = parseInt(sessionStorage.getItem("sp_token_expiry") || "0");
+  if (token && Date.now() < expiry - 60000) return token;
+  return null;
+}
+
+// ── SharePoint Graph API helpers ─────────────────────────────────────────────
+async function spRequest(token, path, options = {}) {
+  const res = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+    ...options,
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  if (!res.ok) throw new Error(`Graph API error: ${res.status} ${await res.text()}`);
+  return options.raw ? res : res.json();
+}
+
+async function getSiteId(token) {
+  const host = "nelem.sharepoint.com";
+  const sitePath = "/sites/allcompany";
+  const data = await spRequest(token, `/sites/${host}:${sitePath}`);
+  return data.id;
+}
+
+async function getDriveId(token, siteId) {
+  const data = await spRequest(token, `/sites/${siteId}/drives`);
+  // find the Documents drive
+  const drive = data.value.find(d => d.name === "Documents" || d.driveType === "documentLibrary") || data.value[0];
+  return drive.id;
+}
+
+async function listFolderFiles(token, driveId, folderPath) {
+  try {
+    const encoded = encodeURIComponent(folderPath);
+    const data = await spRequest(token, `/drives/${driveId}/root:${encoded}:/children?$filter=endswith(name,'.pdf')&$select=id,name,file,lastModifiedDateTime`);
+    return data.value || [];
+  } catch { return []; }
+}
+
+async function getFileBase64(token, driveId, fileId) {
+  const res = await spRequest(token, `/drives/${driveId}/items/${fileId}/content`, { raw: true });
+  const blob = await res.blob();
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result.split(",")[1]);
+    r.onerror = reject;
+    r.readAsDataURL(blob);
+  });
+}
+
+async function loadDashboardData(token, driveId) {
+  try {
+    const res = await spRequest(token, `/drives/${driveId}/root:${SP_CONFIG.dataFile}:/content`, { raw: true });
+    const text = await res.text();
+    return JSON.parse(text);
+  } catch { return null; }
+}
+
+async function saveDashboardData(token, driveId, data) {
+  const json = JSON.stringify(data, null, 2);
+  await spRequest(token, `/drives/${driveId}/root:${SP_CONFIG.dataFile}:/content`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: json,
+  });
+}
+
 const TABS = ["Overview", "P&L", "Cash Flow", "Invoices", "Engagements"];
 
 // ── Main component ────────────────────────────────────────────────────────────
@@ -212,6 +318,17 @@ export default function FinancialDashboard() {
   const [editingBank,       setEditingBank]       = useState(null); // id of account being edited
   const [expandedCfMonth,   setExpandedCfMonth]   = useState(null);
   const [engFilter,         setEngFilter]         = useState("All");
+  const [editingEng,        setEditingEng]        = useState(null); // null | "new" | po.id
+
+  // ── SharePoint auth & sync state ─────────────────────────────────────────
+  const [spToken,           setSpToken]           = useState(() => getTokenFromHash() || getSavedToken());
+  const [spUser,            setSpUser]            = useState(null);
+  const [spSyncing,         setSpSyncing]         = useState(false);
+  const [spSyncStatus,      setSpSyncStatus]      = useState(null); // null | "syncing" | "done" | "error"
+  const [spSyncLog,         setSpSyncLog]         = useState([]);
+  const [spSiteId,          setSpSiteId]          = useState(null);
+  const [spDriveId,         setSpDriveId]         = useState(null);
+  const [processedFiles,    setProcessedFiles]    = useState(new Set()); // file IDs already imported
 
   // ── Forecast state ────────────────────────────────────────────────────────
   const [showForecastPanel, setShowForecastPanel] = useState(false);
@@ -233,6 +350,116 @@ export default function FinancialDashboard() {
 
   // Convert any amount to EUR using current fx rates
   const toEUR = (amount, currency) => (amount || 0) * (fx[currency || "EUR"] || 1);
+
+  // ── SharePoint: load user info on login ──────────────────────────────────
+  React.useEffect(() => {
+    if (!spToken) return;
+    spRequest(spToken, "/me").then(data => {
+      setSpUser({ name: data.displayName, email: data.mail || data.userPrincipalName });
+    }).catch(() => {
+      // token expired — clear it
+      sessionStorage.removeItem("sp_token");
+      sessionStorage.removeItem("sp_token_expiry");
+      setSpToken(null);
+    });
+  }, [spToken]);
+
+  // ── SharePoint: auto-sync on open ────────────────────────────────────────
+  React.useEffect(() => {
+    if (spToken && !spSyncing && spSyncStatus === null) {
+      handleSpSync();
+    }
+  }, [spToken]);
+
+  // ── SharePoint: initialise site/drive IDs ────────────────────────────────
+  async function initSpIds(token) {
+    if (spSiteId && spDriveId) return { siteId: spSiteId, driveId: spDriveId };
+    const siteId = await getSiteId(token);
+    const driveId = await getDriveId(token, siteId);
+    setSpSiteId(siteId);
+    setSpDriveId(driveId);
+    return { siteId, driveId };
+  }
+
+  // ── SharePoint: main sync function ───────────────────────────────────────
+  async function handleSpSync() {
+    if (!spToken || spSyncing) return;
+    setSpSyncing(true);
+    setSpSyncStatus("syncing");
+    setSpSyncLog([]);
+    const log = (msg, type="info") => setSpSyncLog(prev => [...prev, { msg, type, time: new Date().toLocaleTimeString() }]);
+
+    try {
+      log("Connecting to SharePoint...");
+      const { driveId } = await initSpIds(spToken);
+
+      // Load existing saved data
+      log("Loading saved dashboard data...");
+      const saved = await loadDashboardData(spToken, driveId);
+      const existingInvoices = saved?.invoices || [];
+      const existingProcessed = new Set(saved?.processedFiles || []);
+      const newInvoices = [...existingInvoices];
+      let newCount = 0;
+
+      // Scan years 2022–2026, months 01–12
+      const years = ["2022","2023","2024","2025","2026"];
+      const months = ["01","02","03","04","05","06","07","08","09","10","11","12"];
+
+      for (const type of ["Sales","Costs"]) {
+        const basePath = type === "Sales" ? SP_CONFIG.salesPath : SP_CONFIG.costsPath;
+        for (const year of years) {
+          for (const month of months) {
+            const folderPath = `${basePath}/${year}/${month}`;
+            const files = await listFolderFiles(spToken, driveId, folderPath);
+            if (files.length === 0) continue;
+
+            for (const file of files) {
+              if (existingProcessed.has(file.id)) continue;
+              log(`📄 Extracting: ${file.name} (${type} ${year}/${month})`);
+              try {
+                const base64 = await getFileBase64(spToken, driveId, file.id);
+                const extracted = await extractInvoiceFromPDF(base64);
+                const invoice = {
+                  ...extracted,
+                  _filename: file.name,
+                  _spFileId: file.id,
+                  _source: "sharepoint",
+                  category: extracted.category || (type === "Sales" ? "Sales" : "Uncategorized"),
+                  currency: extracted.currency || "EUR",
+                  status: extracted.status || "Pending",
+                };
+                newInvoices.push(invoice);
+                existingProcessed.add(file.id);
+                newCount++;
+                log(`✅ Imported: ${extracted.client || file.name} — ${extracted.amount ? "€"+extracted.amount : "amount unknown"}`, "success");
+              } catch (e) {
+                log(`⚠ Failed to extract: ${file.name} — ${e.message}`, "warning");
+                existingProcessed.add(file.id); // mark as processed to avoid retrying
+              }
+            }
+          }
+        }
+      }
+
+      // Save updated data back to SharePoint
+      log("Saving data to SharePoint...");
+      await saveDashboardData(spToken, driveId, {
+        invoices: newInvoices,
+        processedFiles: [...existingProcessed],
+        lastSync: new Date().toISOString(),
+      });
+
+      setInvoices(newInvoices);
+      setProcessedFiles(existingProcessed);
+      log(`✅ Sync complete — ${newCount} new invoice${newCount!==1?"s":""} imported`, "success");
+      setSpSyncStatus("done");
+    } catch (e) {
+      log(`❌ Sync failed: ${e.message}`, "error");
+      setSpSyncStatus("error");
+    } finally {
+      setSpSyncing(false);
+    }
+  }
 
   // ── Forecast by month (manual + pipeline weighted) ────────────────────────
   const forecastByMonth = useMemo(() => {
@@ -434,6 +661,34 @@ export default function FinancialDashboard() {
 
   const uncatCount = invoices.filter(i => !i.category || i.category === "Uncategorized").length;
 
+  // ── Login screen if not authenticated ───────────────────────────────────
+  if (!spToken) {
+    return (
+      <div style={{ fontFamily:"'DM Sans','Helvetica Neue',sans-serif", background:"#f7f7f5", minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center" }}>
+        <style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap');*{box-sizing:border-box;}`}</style>
+        <div style={{ background:"#fff", borderRadius:20, border:"1px solid #eceae6", padding:"48px 56px", maxWidth:440, width:"90%", textAlign:"center", boxShadow:"0 8px 40px rgba(0,0,0,.08)" }}>
+          <div style={{ fontSize:36, marginBottom:16 }}>📊</div>
+          <div style={{ fontSize:22, fontWeight:700, letterSpacing:"-.02em", marginBottom:8 }}>Finance Dashboard</div>
+          <div style={{ fontSize:14, color:"#888", marginBottom:32, lineHeight:1.6 }}>
+            Sign in with your Microsoft 365 account to access your invoices and financial data from SharePoint.
+          </div>
+          <button onClick={msalLogin} style={{
+            width:"100%", fontFamily:"inherit", fontSize:15, fontWeight:600,
+            background:"#0078d4", color:"#fff", border:"none", borderRadius:10,
+            padding:"14px 24px", cursor:"pointer", display:"flex", alignItems:"center",
+            justifyContent:"center", gap:10,
+          }}>
+            <svg width="20" height="20" viewBox="0 0 21 21" fill="none"><rect x="1" y="1" width="9" height="9" fill="#f25022"/><rect x="11" y="1" width="9" height="9" fill="#7fba00"/><rect x="1" y="11" width="9" height="9" fill="#00a4ef"/><rect x="11" y="11" width="9" height="9" fill="#ffb900"/></svg>
+            Sign in with Microsoft
+          </button>
+          <div style={{ fontSize:11.5, color:"#bbb", marginTop:20 }}>
+            Access restricted to authorised users only · Nelem Solutions
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ fontFamily:"'DM Sans','Helvetica Neue',sans-serif", background:"#f7f7f5", minHeight:"100vh", color:"#1a1a1a" }}>
       <style>{`
@@ -462,6 +717,28 @@ export default function FinancialDashboard() {
         .cat-select{font-family:inherit;font-size:12px;border:1.5px solid #1a1a1a;border-radius:6px;padding:3px 8px;background:#fff;cursor:pointer;outline:none;}
       `}</style>
 
+      {/* ── Sync status banner ── */}
+      {spSyncStatus === "syncing" && (
+        <div style={{ background:"#e3f2fd", borderBottom:"1px solid #bbdefb", padding:"10px 32px", display:"flex", alignItems:"center", gap:10, fontSize:13 }}>
+          <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>⟳</span>
+          <span style={{ fontWeight:500 }}>Syncing invoices from SharePoint...</span>
+          {spSyncLog.length > 0 && <span style={{ color:"#555" }}>{spSyncLog[spSyncLog.length-1].msg}</span>}
+        </div>
+      )}
+      {spSyncStatus === "done" && (
+        <div style={{ background:"#e8f5e9", borderBottom:"1px solid #c8e6c9", padding:"8px 32px", display:"flex", alignItems:"center", gap:10, fontSize:12.5 }}>
+          ✅ <span>{spSyncLog.find(l=>l.type==="success"&&l.msg.includes("complete"))?.msg || "Sync complete"}</span>
+          <button onClick={() => setSpSyncStatus(null)} style={{ marginLeft:"auto", background:"none", border:"none", cursor:"pointer", color:"#aaa", fontSize:14 }}>✕</button>
+        </div>
+      )}
+      {spSyncStatus === "error" && (
+        <div style={{ background:"#fce4ec", borderBottom:"1px solid #ffcdd2", padding:"8px 32px", display:"flex", alignItems:"center", gap:10, fontSize:12.5 }}>
+          ❌ <span>{spSyncLog.find(l=>l.type==="error")?.msg || "Sync failed"}</span>
+          <button onClick={handleSpSync} style={{ marginLeft:12, fontFamily:"inherit", fontSize:12, fontWeight:600, background:"#c62828", color:"#fff", border:"none", borderRadius:6, padding:"3px 10px", cursor:"pointer" }}>Retry</button>
+          <button onClick={() => setSpSyncStatus(null)} style={{ marginLeft:"auto", background:"none", border:"none", cursor:"pointer", color:"#aaa", fontSize:14 }}>✕</button>
+        </div>
+      )}
+
       {/* ── Header ── */}
       <div style={{ background:"#fff", borderBottom:"1px solid #eceae6", padding:"0 32px" }}>
         <div style={{ maxWidth:1280, margin:"0 auto" }}>
@@ -470,7 +747,31 @@ export default function FinancialDashboard() {
               <span style={{ fontSize:20, fontWeight:600, letterSpacing:"-.02em" }}>Finance</span>
               <span style={{ fontSize:13, color:"#aaa" }}>FY 2024 · H1 View</span>
             </div>
-            <div style={{ display:"flex", alignItems:"center", gap:16 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+              {/* SharePoint sync button + user */}
+              <button onClick={handleSpSync} disabled={spSyncing} style={{
+                fontFamily:"inherit", fontSize:12, fontWeight:600,
+                background: spSyncing ? "#f0f4ff" : "#e8f5e9",
+                color: spSyncing ? "#1565c0" : "#2e7d32",
+                border:`1.5px solid ${spSyncing?"#bbdefb":"#c8e6c9"}`,
+                borderRadius:8, padding:"5px 12px", cursor: spSyncing?"default":"pointer",
+                display:"flex", alignItems:"center", gap:6,
+              }}>
+                <span style={{ display:"inline-block", animation: spSyncing?"spin 1s linear infinite":undefined }}>⟳</span>
+                {spSyncing ? "Syncing..." : "Sync SharePoint"}
+              </button>
+              {spUser && (
+                <div style={{ display:"flex", alignItems:"center", gap:8, padding:"4px 10px", background:"#f7f7f5", borderRadius:8, border:"1px solid #eceae6" }}>
+                  <div style={{ width:24, height:24, borderRadius:"50%", background:"#1565c0", display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontSize:11, fontWeight:700, flexShrink:0 }}>
+                    {(spUser.name||"?")[0].toUpperCase()}
+                  </div>
+                  <div style={{ fontSize:11.5, lineHeight:1.3 }}>
+                    <div style={{ fontWeight:600, color:"#1a1a1a" }}>{spUser.name}</div>
+                    <div style={{ color:"#aaa" }}>{spUser.email}</div>
+                  </div>
+                  <button onClick={() => { sessionStorage.removeItem("sp_token"); sessionStorage.removeItem("sp_token_expiry"); setSpToken(null); }} style={{ background:"none", border:"none", cursor:"pointer", color:"#bbb", fontSize:13, marginLeft:4 }} title="Sign out">✕</button>
+                </div>
+              )}
               {/* FX rates button + inline panel */}
               <div style={{ position:"relative" }}>
                 <button onClick={() => setShowFxPanel(v => !v)} style={{
@@ -1672,6 +1973,180 @@ export default function FinancialDashboard() {
 
         {/* ── ENGAGEMENTS ── */}
         {activeTab === "Engagements" && (() => {
+
+          // ── PO helpers ───────────────────────────────────────────────────
+          const emptyPO = () => ({
+            id: "PO-" + Date.now(),
+            client: "", description: "", amount: 0,
+            startDate: "", endDate: "", status: "Active",
+            unitType: "days", totalUnits: 0,
+            monthlyBurn: [0,0,0,0,0,0],
+            projectId: "",
+          });
+
+          const savePO = (po) => {
+            const pid = po.client.toLowerCase().replace(/\s+/g,"-").replace(/[^a-z0-9-]/g,"");
+            const poWithProject = { ...po, projectId: pid };
+            setPos(prev => {
+              const exists = prev.find(p => p.id === po.id);
+              return exists ? prev.map(p => p.id === po.id ? poWithProject : p) : [...prev, poWithProject];
+            });
+            setEditingEng(null);
+          };
+
+          const deletePO = (id) => {
+            if (!window.confirm("Delete this engagement? This cannot be undone.")) return;
+            setPos(prev => prev.filter(p => p.id !== id));
+            if (expandedPO === id) setExpandedPO(null);
+          };
+
+          // ── Edit modal ───────────────────────────────────────────────────
+          if (editingEng !== null) {
+            const isNew = editingEng === "new";
+            const [draft, setDraft] = React.useState(() => isNew ? emptyPO() : { ...pos.find(p => p.id === editingEng), monthlyBurn: [...(pos.find(p=>p.id===editingEng)?.monthlyBurn || [0,0,0,0,0,0])] });
+            const set = (k, v) => setDraft(d => ({ ...d, [k]: v }));
+            const setBurn = (i, v) => setDraft(d => { const b = [...d.monthlyBurn]; b[i] = parseFloat(v)||0; return { ...d, monthlyBurn: b }; });
+
+            return (
+              <div>
+                {/* Modal backdrop */}
+                <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.35)", zIndex:200, display:"flex", alignItems:"center", justifyContent:"center", padding:24 }}>
+                  <div style={{ background:"#fff", borderRadius:18, border:"1px solid #eceae6", width:"100%", maxWidth:640, maxHeight:"90vh", overflowY:"auto", boxShadow:"0 24px 80px rgba(0,0,0,.18)" }}>
+
+                    {/* Modal header */}
+                    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"22px 28px 16px", borderBottom:"1px solid #f0eeea" }}>
+                      <div style={{ fontWeight:700, fontSize:17 }}>{isNew ? "➕ New Engagement" : "✏️ Edit Engagement"}</div>
+                      <button onClick={() => setEditingEng(null)} style={{ background:"none", border:"none", fontSize:20, cursor:"pointer", color:"#aaa" }}>✕</button>
+                    </div>
+
+                    <div style={{ padding:"22px 28px", display:"flex", flexDirection:"column", gap:18 }}>
+
+                      {/* Row 1: Client + Status */}
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
+                        <div>
+                          <label style={{ fontSize:11.5, fontWeight:600, color:"#888", textTransform:"uppercase", letterSpacing:".06em", display:"block", marginBottom:6 }}>Client *</label>
+                          <input value={draft.client} onChange={e => set("client", e.target.value)}
+                            placeholder="e.g. Meridian Corp"
+                            style={{ width:"100%", fontFamily:"inherit", fontSize:14, border:"1.5px solid #e0ddd8", borderRadius:8, padding:"9px 12px", outline:"none" }}/>
+                        </div>
+                        <div>
+                          <label style={{ fontSize:11.5, fontWeight:600, color:"#888", textTransform:"uppercase", letterSpacing:".06em", display:"block", marginBottom:6 }}>Status</label>
+                          <select value={draft.status} onChange={e => set("status", e.target.value)}
+                            style={{ width:"100%", fontFamily:"inherit", fontSize:14, border:"1.5px solid #e0ddd8", borderRadius:8, padding:"9px 12px", outline:"none", background:"#fff" }}>
+                            {["Active","Pending","Completed"].map(s => <option key={s}>{s}</option>)}
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* Description */}
+                      <div>
+                        <label style={{ fontSize:11.5, fontWeight:600, color:"#888", textTransform:"uppercase", letterSpacing:".06em", display:"block", marginBottom:6 }}>Description</label>
+                        <input value={draft.description} onChange={e => set("description", e.target.value)}
+                          placeholder="e.g. Backend Development Q2"
+                          style={{ width:"100%", fontFamily:"inherit", fontSize:14, border:"1.5px solid #e0ddd8", borderRadius:8, padding:"9px 12px", outline:"none" }}/>
+                      </div>
+
+                      {/* Row: Budget + Unit type + Total units */}
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:14 }}>
+                        <div>
+                          <label style={{ fontSize:11.5, fontWeight:600, color:"#888", textTransform:"uppercase", letterSpacing:".06em", display:"block", marginBottom:6 }}>PO Value (€)</label>
+                          <input type="number" value={draft.amount} onChange={e => set("amount", parseFloat(e.target.value)||0)}
+                            style={{ width:"100%", fontFamily:"DM Mono", fontSize:14, border:"1.5px solid #e0ddd8", borderRadius:8, padding:"9px 12px", outline:"none" }}/>
+                        </div>
+                        <div>
+                          <label style={{ fontSize:11.5, fontWeight:600, color:"#888", textTransform:"uppercase", letterSpacing:".06em", display:"block", marginBottom:6 }}>Unit type</label>
+                          <select value={draft.unitType} onChange={e => set("unitType", e.target.value)}
+                            style={{ width:"100%", fontFamily:"inherit", fontSize:14, border:"1.5px solid #e0ddd8", borderRadius:8, padding:"9px 12px", outline:"none", background:"#fff" }}>
+                            <option value="days">Man-days</option>
+                            <option value="hours">Hours</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label style={{ fontSize:11.5, fontWeight:600, color:"#888", textTransform:"uppercase", letterSpacing:".06em", display:"block", marginBottom:6 }}>Total {draft.unitType === "hours" ? "hours" : "man-days"}</label>
+                          <input type="number" value={draft.totalUnits} onChange={e => set("totalUnits", parseFloat(e.target.value)||0)}
+                            style={{ width:"100%", fontFamily:"DM Mono", fontSize:14, border:"1.5px solid #e0ddd8", borderRadius:8, padding:"9px 12px", outline:"none" }}/>
+                        </div>
+                      </div>
+
+                      {/* Row: Dates */}
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
+                        <div>
+                          <label style={{ fontSize:11.5, fontWeight:600, color:"#888", textTransform:"uppercase", letterSpacing:".06em", display:"block", marginBottom:6 }}>Start date</label>
+                          <input type="date" value={draft.startDate} onChange={e => set("startDate", e.target.value)}
+                            style={{ width:"100%", fontFamily:"inherit", fontSize:14, border:"1.5px solid #e0ddd8", borderRadius:8, padding:"9px 12px", outline:"none" }}/>
+                        </div>
+                        <div>
+                          <label style={{ fontSize:11.5, fontWeight:600, color:"#888", textTransform:"uppercase", letterSpacing:".06em", display:"block", marginBottom:6 }}>End date</label>
+                          <input type="date" value={draft.endDate} onChange={e => set("endDate", e.target.value)}
+                            style={{ width:"100%", fontFamily:"inherit", fontSize:14, border:"1.5px solid #e0ddd8", borderRadius:8, padding:"9px 12px", outline:"none" }}/>
+                        </div>
+                      </div>
+
+                      {/* Monthly burndown editor */}
+                      <div>
+                        <label style={{ fontSize:11.5, fontWeight:600, color:"#888", textTransform:"uppercase", letterSpacing:".06em", display:"block", marginBottom:10 }}>
+                          Monthly {draft.unitType === "hours" ? "hours" : "man-days"} burndown
+                          <span style={{ fontSize:11, fontWeight:400, color:"#bbb", marginLeft:8 }}>
+                            Total planned: <strong style={{ fontFamily:"DM Mono", color:"#555" }}>{draft.monthlyBurn.reduce((s,v)=>s+v,0)}</strong> / {draft.totalUnits} {draft.unitType==="hours"?"h":"d"}
+                          </span>
+                        </label>
+                        <div style={{ display:"grid", gridTemplateColumns:"repeat(6,1fr)", gap:8 }}>
+                          {MONTHS.map((m, i) => (
+                            <div key={m}>
+                              <div style={{ fontSize:11, color:"#aaa", textAlign:"center", marginBottom:4 }}>{m}</div>
+                              <input
+                                type="number" min="0" step="0.5"
+                                value={draft.monthlyBurn[i] || 0}
+                                onChange={e => setBurn(i, e.target.value)}
+                                style={{ width:"100%", fontFamily:"DM Mono", fontSize:13, border:"1.5px solid #e0ddd8", borderRadius:7, padding:"7px 6px", outline:"none", textAlign:"center" }}
+                              />
+                            </div>
+                          ))}
+                        </div>
+                        {/* Mini bar preview */}
+                        <div style={{ display:"flex", gap:4, alignItems:"flex-end", height:40, marginTop:10 }}>
+                          {MONTHS.map((m, i) => {
+                            const val = draft.monthlyBurn[i] || 0;
+                            const max = Math.max(...draft.monthlyBurn, 1);
+                            return (
+                              <div key={m} style={{ flex:1, display:"flex", alignItems:"flex-end", height:"100%" }}>
+                                <div style={{ width:"100%", borderRadius:"3px 3px 0 0", background: val>0?"#1976d2":"#eceae6", height:`${val===0?8:(val/max)*100}%`, minHeight:4, transition:"height .3s" }}/>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* PO ID (readonly for existing) */}
+                      <div>
+                        <label style={{ fontSize:11.5, fontWeight:600, color:"#888", textTransform:"uppercase", letterSpacing:".06em", display:"block", marginBottom:6 }}>PO Reference ID</label>
+                        <input value={draft.id} onChange={e => isNew && set("id", e.target.value)}
+                          readOnly={!isNew}
+                          style={{ width:"100%", fontFamily:"DM Mono", fontSize:13, border:"1.5px solid #e0ddd8", borderRadius:8, padding:"9px 12px", outline:"none", background: isNew?"#fff":"#fafaf8", color: isNew?"#1a1a1a":"#aaa" }}/>
+                      </div>
+
+                    </div>
+
+                    {/* Modal footer */}
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"16px 28px 24px", borderTop:"1px solid #f0eeea" }}>
+                      <button onClick={() => setEditingEng(null)}
+                        style={{ fontFamily:"inherit", fontSize:13, fontWeight:600, background:"none", border:"1.5px solid #e0ddd8", borderRadius:8, padding:"9px 20px", cursor:"pointer", color:"#888" }}>
+                        Cancel
+                      </button>
+                      <button onClick={() => savePO(draft)} disabled={!draft.client.trim()}
+                        style={{ fontFamily:"inherit", fontSize:13, fontWeight:700, background: draft.client.trim()?"#1a1a1a":"#ccc", color:"#fff", border:"none", borderRadius:8, padding:"9px 24px", cursor: draft.client.trim()?"pointer":"default" }}>
+                        {isNew ? "Create Engagement" : "Save Changes"}
+                      </button>
+                    </div>
+
+                  </div>
+                </div>
+              </div>
+            );
+          }
+
+          // ── Main list view ───────────────────────────────────────────────
+          // Build engagements: merge POs with project invoice data
           // Build engagements: merge POs with project invoice data
           const engagements = pos.map(po => {
             const proj = projects.find(p => p.id === po.projectId) || null;
@@ -1733,6 +2208,14 @@ export default function FinancialDashboard() {
                 <span style={{ marginLeft:"auto", fontSize:12.5, color:"#aaa" }}>
                   {filtered.length} engagement{filtered.length!==1?"s":""} · <strong style={{ color:"#1a1a1a", fontFamily:"DM Mono" }}>{fmt(filtered.reduce((s,e)=>s+e.po.amount,0))}</strong> total PO value
                 </span>
+                <button onClick={() => setEditingEng("new")} style={{
+                  fontFamily:"inherit", fontSize:12.5, fontWeight:700,
+                  background:"#1a1a1a", color:"#fff", border:"none",
+                  borderRadius:8, padding:"7px 16px", cursor:"pointer",
+                  display:"flex", alignItems:"center", gap:6, marginLeft:8,
+                }}>
+                  ➕ New Engagement
+                </button>
               </div>
 
               {/* Engagement cards */}
@@ -1795,6 +2278,11 @@ export default function FinancialDashboard() {
                           </div>
                         </div>
                         <div style={{ fontSize:18, color:"#ccc", userSelect:"none", marginLeft:4 }}>{isExpanded?"▲":"▼"}</div>
+                        {/* Edit / Delete — stop propagation so they don't toggle expand */}
+                        <div style={{ display:"flex", gap:6, flexShrink:0 }} onClick={e => e.stopPropagation()}>
+                          <button onClick={() => setEditingEng(po.id)} style={{ fontFamily:"inherit", fontSize:11.5, fontWeight:600, background:"#f0f4ff", color:"#1565c0", border:"1px solid #bbdefb", borderRadius:7, padding:"5px 11px", cursor:"pointer" }}>✏️ Edit</button>
+                          <button onClick={() => deletePO(po.id)} style={{ fontFamily:"inherit", fontSize:11.5, fontWeight:600, background:"#fce4ec", color:"#c62828", border:"1px solid #ffcdd2", borderRadius:7, padding:"5px 11px", cursor:"pointer" }}>🗑 Delete</button>
+                        </div>
                       </div>
 
                       {/* ── Progress bars ── */}
