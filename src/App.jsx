@@ -275,18 +275,28 @@ async function spRequest(token, path, options = {}) {
   return options.raw ? res : res.json();
 }
 
-async function getSiteId(token) {
-  const host = "nelem.sharepoint.com";
-  const sitePath = "/sites/allcompany";
-  const data = await spRequest(token, `/sites/${host}:${sitePath}`);
-  return data.id;
-}
-
 async function getDriveId(token, siteId) {
   const data = await spRequest(token, `/sites/${siteId}/drives`);
-  // find the Documents drive
-  const drive = data.value.find(d => d.name === "Documents" || d.driveType === "documentLibrary") || data.value[0];
+  // Prefer "Documents" or first documentLibrary, fall back to first drive
+  const drive = data.value.find(d => d.name === "Documents")
+    || data.value.find(d => d.driveType === "documentLibrary")
+    || data.value[0];
+  if (!drive) throw new Error(`No drives found on site. Available: ${JSON.stringify(data.value?.map(d=>d.name))}`);
   return drive.id;
+}
+
+async function getSiteId(token) {
+  // Try direct site lookup first
+  try {
+    const data = await spRequest(token, `/sites/nelem.sharepoint.com:/sites/allcompany`);
+    return data.id;
+  } catch (e) {
+    // Fallback: search for the site
+    const data = await spRequest(token, `/sites?search=allcompany`);
+    const site = data.value?.[0];
+    if (!site) throw new Error("Could not find SharePoint site 'allcompany'");
+    return site.id;
+  }
 }
 
 async function listFolderFiles(token, driveId, folderPath) {
@@ -454,6 +464,7 @@ export default function FinancialDashboard() {
     try {
       log("Connecting to SharePoint...");
       const { driveId } = await initSpIds(spToken);
+      log(`✅ Connected to SharePoint (drive: ${driveId.slice(0,12)}...)`);
 
       // Load existing saved data
       log("Loading saved dashboard data...");
@@ -807,10 +818,21 @@ export default function FinancialDashboard() {
         </div>
       )}
       {spSyncStatus === "error" && (
-        <div style={{ background:"#fce4ec", borderBottom:"1px solid #ffcdd2", padding:"8px 32px", display:"flex", alignItems:"center", gap:10, fontSize:12.5 }}>
-          ❌ <span>{spSyncLog.find(l=>l.type==="error")?.msg || "Sync failed"}</span>
-          <button onClick={handleSpSync} style={{ marginLeft:12, fontFamily:"inherit", fontSize:12, fontWeight:600, background:"#c62828", color:"#fff", border:"none", borderRadius:6, padding:"3px 10px", cursor:"pointer" }}>Retry</button>
-          <button onClick={() => setSpSyncStatus(null)} style={{ marginLeft:"auto", background:"none", border:"none", cursor:"pointer", color:"#aaa", fontSize:14 }}>✕</button>
+        <div style={{ background:"#fce4ec", borderBottom:"1px solid #ffcdd2", padding:"10px 32px", fontSize:12.5 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom: spSyncLog.length > 1 ? 8 : 0 }}>
+            ❌ <span style={{ fontWeight:600 }}>{spSyncLog.find(l=>l.type==="error")?.msg || "Sync failed"}</span>
+            <button onClick={handleSpSync} style={{ marginLeft:8, fontFamily:"inherit", fontSize:12, fontWeight:600, background:"#c62828", color:"#fff", border:"none", borderRadius:6, padding:"3px 10px", cursor:"pointer" }}>Retry</button>
+            <button onClick={() => setSpSyncStatus(null)} style={{ marginLeft:"auto", background:"none", border:"none", cursor:"pointer", color:"#aaa", fontSize:14 }}>✕</button>
+          </div>
+          {spSyncLog.length > 0 && (
+            <div style={{ background:"#fff0f0", borderRadius:6, padding:"8px 10px", fontFamily:"DM Mono", fontSize:11, maxHeight:120, overflowY:"auto" }}>
+              {spSyncLog.map((l,i) => (
+                <div key={i} style={{ color: l.type==="error"?"#c62828":l.type==="warning"?"#f57c00":"#555", marginBottom:2 }}>
+                  {l.time} — {l.msg}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
