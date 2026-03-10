@@ -185,12 +185,12 @@ Category options (pick the single best match):
 const SP_CONFIG = {
   clientId:   "9151d8bd-8348-4686-8273-7192ed96ad44",
   tenantId:   "5f5523a6-37c8-4aaf-8205-75ac338e4678",
-  siteUrl:    "https://nelem.sharepoint.com/sites/allcompany",
+  siteUrl:    "https://nelem-my.sharepoint.com",
   basePath:   "/Nelem/NELEM SOLUTIONS/AA_FAKTURY/Nelem Solutions - spółka/FAKTURY",
   salesPath:  "/Nelem/NELEM SOLUTIONS/AA_FAKTURY/Nelem Solutions - spółka/FAKTURY/Sales",
   costsPath:  "/Nelem/NELEM SOLUTIONS/AA_FAKTURY/Nelem Solutions - spółka/FAKTURY/Costs",
   dataFile:   "/Nelem/NELEM SOLUTIONS/AA_FAKTURY/Nelem Solutions - spółka/FAKTURY/dashboard-data.json",
-  scopes:     ["https://graph.microsoft.com/Files.ReadWrite", "https://graph.microsoft.com/Sites.Selected", "https://graph.microsoft.com/User.Read"],
+  scopes:     ["https://graph.microsoft.com/Files.ReadWrite", "https://graph.microsoft.com/Sites.ReadWrite.All", "https://graph.microsoft.com/User.Read"],
 };
 
 // ── MSAL auth helpers (PKCE flow) ────────────────────────────────────────────
@@ -289,20 +289,25 @@ async function getDriveId(token, siteId) {
 }
 
 async function getSiteId(token) {
-  try {
-    const data = await spRequest(token, `/sites/nelem.sharepoint.com,sites,allcompany`);
-    if (data.id) return data.id;
-  } catch(e) { console.log("Site lookup attempt 1 failed:", e.message); }
-  try {
-    const data = await spRequest(token, `/sites/nelem.sharepoint.com:/sites/allcompany:`);
-    if (data.id) return data.id;
-  } catch(e) { console.log("Site lookup attempt 2 failed:", e.message); }
-  // Last resort: search
-  const data = await spRequest(token, `/sites?search=allcompany`);
-  const site = data.value?.[0];
-  if (!site) throw new Error("Could not find SharePoint site 'allcompany' — check permissions");
-  console.log("Found site via search:", site.displayName, site.id);
-  return site.id;
+  // Not needed for OneDrive — return null
+  return null;
+}
+
+async function getDriveId(token, siteId) {
+  // Use the signed-in user's OneDrive drive directly
+  const data = await spRequest(token, `/me/drive`);
+  if (!data.id) throw new Error("Could not access OneDrive drive");
+  console.log("Using drive:", data.name, data.driveType, data.id);
+  return data.id;
+}
+
+async function initSpIds_override(token) {
+  if (spDriveId) return { siteId: null, driveId: spDriveId };
+  const data = await spRequest(token, `/me/drive`);
+  if (!data.id) throw new Error("Could not access OneDrive");
+  setSpSiteId(null);
+  setSpDriveId(data.id);
+  return { siteId: null, driveId: data.id };
 }
 
 async function listFolderFiles(token, driveId, folderPath) {
@@ -451,12 +456,13 @@ export default function FinancialDashboard() {
 
   // ── SharePoint: initialise site/drive IDs ────────────────────────────────
   async function initSpIds(token) {
-    if (spSiteId && spDriveId) return { siteId: spSiteId, driveId: spDriveId };
-    const siteId = await getSiteId(token);
-    const driveId = await getDriveId(token, siteId);
-    setSpSiteId(siteId);
-    setSpDriveId(driveId);
-    return { siteId, driveId };
+    if (spDriveId) return { siteId: null, driveId: spDriveId };
+    const data = await spRequest(token, `/me/drive`);
+    if (!data.id) throw new Error("Could not access OneDrive/SharePoint drive");
+    console.log("Drive found:", data.name, data.driveType, data.webUrl);
+    setSpSiteId(null);
+    setSpDriveId(data.id);
+    return { siteId: null, driveId: data.id };
   }
 
   // ── SharePoint: main sync function ───────────────────────────────────────
