@@ -193,30 +193,68 @@ const SP_CONFIG = {
   scopes:     ["https://graph.microsoft.com/Files.ReadWrite", "https://graph.microsoft.com/Sites.Selected", "https://graph.microsoft.com/User.Read"],
 };
 
-// ── MSAL auth helpers ────────────────────────────────────────────────────────
+// ── MSAL auth helpers (PKCE flow) ────────────────────────────────────────────
+function base64urlEncode(buf) {
+  return btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function generatePKCE() {
+  const verifier = base64urlEncode(crypto.getRandomValues(new Uint8Array(32)));
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  const challenge = base64urlEncode(digest);
+  return { verifier, challenge };
+}
+
 async function msalLogin() {
+  const { verifier, challenge } = await generatePKCE();
+  const state = Math.random().toString(36).slice(2);
+  sessionStorage.setItem("pkce_verifier", verifier);
+  sessionStorage.setItem("pkce_state", state);
+  const redirectUri = window.location.origin + window.location.pathname;
   const authUrl = `https://login.microsoftonline.com/${SP_CONFIG.tenantId}/oauth2/v2.0/authorize?`
     + `client_id=${SP_CONFIG.clientId}`
-    + `&response_type=token`
-    + `&redirect_uri=${encodeURIComponent(window.location.origin + window.location.pathname)}`
-    + `&scope=${encodeURIComponent(SP_CONFIG.scopes.join(" "))}`
-    + `&response_mode=fragment`
-    + `&nonce=${Math.random().toString(36).slice(2)}`;
+    + `&response_type=code`
+    + `&redirect_uri=${encodeURIComponent(redirectUri)}`
+    + `&scope=${encodeURIComponent(SP_CONFIG.scopes.join(" ") + " offline_access")}`
+    + `&response_mode=query`
+    + `&state=${state}`
+    + `&code_challenge=${challenge}`
+    + `&code_challenge_method=S256`;
   window.location.href = authUrl;
 }
 
-function getTokenFromHash() {
-  const hash = window.location.hash.substring(1);
-  const params = new URLSearchParams(hash);
-  const token = params.get("access_token");
-  const expiresIn = params.get("expires_in");
-  if (token) {
-    const expiry = Date.now() + parseInt(expiresIn || "3600") * 1000;
-    sessionStorage.setItem("sp_token", token);
+async function exchangeCodeForToken(code) {
+  const verifier = sessionStorage.getItem("pkce_verifier");
+  const redirectUri = window.location.origin + window.location.pathname;
+  const body = new URLSearchParams({
+    client_id:     SP_CONFIG.clientId,
+    grant_type:    "authorization_code",
+    code,
+    redirect_uri:  redirectUri,
+    code_verifier: verifier,
+    scope:         SP_CONFIG.scopes.join(" ") + " offline_access",
+  });
+  const res = await fetch(`https://login.microsoftonline.com/${SP_CONFIG.tenantId}/oauth2/v2.0/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  const data = await res.json();
+  if (data.access_token) {
+    const expiry = Date.now() + (data.expires_in || 3600) * 1000;
+    sessionStorage.setItem("sp_token", data.access_token);
     sessionStorage.setItem("sp_token_expiry", expiry);
-    window.location.hash = ""; // clean URL
-    return token;
+    if (data.refresh_token) sessionStorage.setItem("sp_refresh_token", data.refresh_token);
+    sessionStorage.removeItem("pkce_verifier");
+    sessionStorage.removeItem("pkce_state");
+    return data.access_token;
   }
+  throw new Error(data.error_description || "Token exchange failed");
+}
+
+function getTokenFromHash() {
+  // PKCE: token comes as ?code= query param, not hash
   return null;
 }
 
@@ -321,7 +359,11 @@ export default function FinancialDashboard() {
   const [editingEng,        setEditingEng]        = useState(null); // null | "new" | po.id
 
   // ── SharePoint auth & sync state ─────────────────────────────────────────
-  const [spToken,           setSpToken]           = useState(() => getTokenFromHash() || getSavedToken());
+  const [spToken,           setSpToken]           = useState(getSavedToken);
+  const [spAuthLoading,     setSpAuthLoading]     = useState(() => {
+    // Check if we're returning from auth redirect with ?code=
+    return new URLSearchParams(window.location.search).has("code");
+  });
   const [spUser,            setSpUser]            = useState(null);
   const [spSyncing,         setSpSyncing]         = useState(false);
   const [spSyncStatus,      setSpSyncStatus]      = useState(null); // null | "syncing" | "done" | "error"
@@ -350,6 +392,26 @@ export default function FinancialDashboard() {
 
   // Convert any amount to EUR using current fx rates
   const toEUR = (amount, currency) => (amount || 0) * (fx[currency || "EUR"] || 1);
+
+  // ── SharePoint: handle PKCE redirect callback ────────────────────────────
+  React.useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code  = params.get("code");
+    const state = params.get("state");
+    if (!code) return;
+    // Validate state
+    const savedState = sessionStorage.getItem("pkce_state");
+    if (state && savedState && state !== savedState) {
+      console.error("State mismatch — possible CSRF");
+      setSpAuthLoading(false);
+      return;
+    }
+    // Clean up URL
+    window.history.replaceState({}, "", window.location.pathname);
+    exchangeCodeForToken(code)
+      .then(token => { setSpToken(token); setSpAuthLoading(false); })
+      .catch(err  => { console.error("Token exchange failed:", err); setSpAuthLoading(false); });
+  }, []);
 
   // ── SharePoint: load user info on login ──────────────────────────────────
   React.useEffect(() => {
@@ -661,6 +723,18 @@ export default function FinancialDashboard() {
 
   const uncatCount = invoices.filter(i => !i.category || i.category === "Uncategorized").length;
 
+  // ── Auth callback loading screen ─────────────────────────────────────────
+  if (spAuthLoading) {
+    return (
+      <div style={{ fontFamily:"'DM Sans','Helvetica Neue',sans-serif", background:"#f7f7f5", minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center" }}>
+        <div style={{ textAlign:"center" }}>
+          <div style={{ fontSize:32, marginBottom:16, animation:"spin 1s linear infinite", display:"inline-block" }}>⟳</div>
+          <div style={{ fontSize:16, fontWeight:600, color:"#555" }}>Signing you in...</div>
+        </div>
+      </div>
+    );
+  }
+
   // ── Login screen if not authenticated ───────────────────────────────────
   if (!spToken) {
     return (
@@ -715,6 +789,7 @@ export default function FinancialDashboard() {
         .cat-pill{display:inline-flex;align-items:center;gap:5px;cursor:pointer;padding:3px 8px;border-radius:6px;border:1.5px dashed #e0ddd8;font-size:12px;transition:border-color .15s;}
         .cat-pill:hover{border-color:#aaa;}
         .cat-select{font-family:inherit;font-size:12px;border:1.5px solid #1a1a1a;border-radius:6px;padding:3px 8px;background:#fff;cursor:pointer;outline:none;}
+        @keyframes spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}
       `}</style>
 
       {/* ── Sync status banner ── */}
