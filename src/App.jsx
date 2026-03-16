@@ -843,9 +843,18 @@ export default function FinancialDashboard() {
         </div>
       )}
       {spSyncStatus === "done" && (
-        <div style={{ background:"#e8f5e9", borderBottom:"1px solid #c8e6c9", padding:"8px 32px", display:"flex", alignItems:"center", gap:10, fontSize:12.5 }}>
-          ✅ <span>{spSyncLog.find(l=>l.type==="success"&&l.msg.includes("complete"))?.msg || "Sync complete"}</span>
-          <button onClick={() => setSpSyncStatus(null)} style={{ marginLeft:"auto", background:"none", border:"none", cursor:"pointer", color:"#aaa", fontSize:14 }}>✕</button>
+        <div style={{ background:"#e8f5e9", borderBottom:"1px solid #c8e6c9", padding:"10px 32px", fontSize:12.5 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:8 }}>
+            ✅ <span style={{ fontWeight:600 }}>{spSyncLog.find(l=>l.type==="success"&&l.msg.includes("complete"))?.msg || "Sync complete"}</span>
+            <button onClick={() => setSpSyncStatus(null)} style={{ marginLeft:"auto", background:"none", border:"none", cursor:"pointer", color:"#aaa", fontSize:14 }}>✕</button>
+          </div>
+          <div style={{ background:"#f0faf2", borderRadius:6, padding:"8px 10px", fontFamily:"DM Mono", fontSize:11, maxHeight:160, overflowY:"auto" }}>
+            {spSyncLog.map((l,i) => (
+              <div key={i} style={{ color: l.type==="error"?"#c62828":l.type==="warning"?"#f57c00":l.type==="success"?"#2e7d32":"#555", marginBottom:2 }}>
+                {l.time} — {l.msg}
+              </div>
+            ))}
+          </div>
         </div>
       )}
       {spSyncStatus === "error" && (
