@@ -493,6 +493,18 @@ export default function FinancialDashboard() {
       const newInvoices = [...existingInvoices];
       let newCount = 0;
 
+      // First, verify the base FAKTURY folder exists and show its contents
+      log("Scanning FAKTURY folder structure...");
+      try {
+        const encoded = encodeURIComponent(SP_CONFIG.basePath);
+        const baseContents = await spRequest(spToken, `/drives/${driveId}/root:${encoded}:/children?$select=id,name,folder,file`);
+        const items = baseContents.value || [];
+        log(`📂 Found ${items.length} item(s) in FAKTURY: ${items.map(i => i.name).join(", ") || "(empty)"}`);
+      } catch(e) {
+        log(`⚠ Could not read FAKTURY folder: ${e.message} — check folder path`, "warning");
+        log(`   Expected path: ${SP_CONFIG.basePath}`, "warning");
+      }
+
       // Scan years 2022–2026, months 01–12
       const years = ["2022","2023","2024","2025","2026"];
       const months = ["01","02","03","04","05","06","07","08","09","10","11","12"];
